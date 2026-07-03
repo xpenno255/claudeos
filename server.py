@@ -115,6 +115,10 @@ def route_unifi_clients(_m, _p, _b):
     return {"clients": unifi.clients(_settings("unifi"))}
 
 
+def route_unifi_insights(_m, _p, _b):
+    return unifi.insights(_settings("unifi"))
+
+
 def route_unifi_restart(_m, p, _b):
     res = unifi.restart_device(_settings("unifi"), p["mac"])
     oplog.add("action", "unifi", f"device restart requested: {p['mac']}")
@@ -234,6 +238,7 @@ ROUTES = [
     ("POST",   r"^/api/poll$",                                            route_poll_now),
     ("GET",    r"^/api/unifi/devices$",                                   route_unifi_devices),
     ("GET",    r"^/api/unifi/clients$",                                   route_unifi_clients),
+    ("GET",    r"^/api/unifi/insights$",                                  route_unifi_insights),
     ("POST",   r"^/api/unifi/devices/(?P<mac>[0-9a-fA-F:]+)/restart$",    route_unifi_restart),
     ("GET",    r"^/api/proxmox/guests$",                                  route_proxmox_guests),
     ("GET",    r"^/api/proxmox/nodes$",                                   route_proxmox_nodes),

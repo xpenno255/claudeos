@@ -100,13 +100,66 @@ function actionBtn(label, run, { danger = false, confirm = true, toast }) {
 // ------------------------------------------------------------ NETWORK
 
 async function network(body, toast) {
-  const [{ devices }, { clients }] = await Promise.all([api.unifiDevices(), api.unifiClients()]);
+  const [{ devices }, { clients }, insights] = await Promise.all([
+    api.unifiDevices(), api.unifiClients(),
+    api.unifiInsights().catch(e => ({ error: String(e.message || e) })),
+  ]);
 
+  // ---- gateway (UDM-SE) health
+  const gwPanel = el("div", { class: "panel" },
+    el("div", { class: "panel-title" }, "GATEWAY HEALTH — UDM-SE"));
+  const gw = insights.gateway;
+  if (insights.error || !gw) {
+    gwPanel.append(el("div", { class: "mono-dim" }, `⚠ ${insights.error || "no gateway device found"}`));
+  } else {
+    gwPanel.append(
+      el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px" },
+        el("span", { class: "pill neutral" }, `${gw.model} · fw ${gw.version}`),
+        el("span", { class: "pill neutral" }, `up ${fmtUptime(gw.uptime)}`),
+        ...(gw.temps || []).map(t => {
+          const cls = t.value >= 75 ? "err" : t.value >= 62 ? "warn" : "ok";
+          return el("span", { class: `pill ${cls}` }, `${t.name} ${t.value.toFixed(1)}°C`);
+        })),
+      meter("CPU", gw.cpu_pct, {}),
+      meter("RAM", gw.mem_pct, {}));
+  }
+
+  // ---- ports with errors / drops
+  const portPanel = el("div", { class: "panel" },
+    el("div", { class: "panel-title" }, "PORT ISSUES — ERRORS & DROPS"));
+  const issues = insights.port_issues || [];
+  if (!insights.error && !issues.length) {
+    portPanel.append(el("div", { class: "pill ok" }, "● NO PORT ERRORS OR DROPS"));
+  } else if (issues.length) {
+    portPanel.append(
+      el("div", { class: "mono-dim", style: "margin-bottom:8px" },
+        "errors usually mean cabling/SFP/negotiation faults; modest drop counts can be benign"),
+      el("div", { class: "table-wrap", style: "max-height:250px;overflow-y:auto" },
+        el("table", {},
+          el("thead", {}, el("tr", {},
+            ...["DEVICE", "PORT", "LINK", ">RX ERR", ">TX ERR", ">DROPS"].map(h =>
+              el("th", { class: h.startsWith(">") ? "num" : "" }, h.replace(/^>/, ""))))),
+          el("tbody", {}, ...issues.map(p => {
+            const errTotal = p.rx_errors + p.tx_errors;
+            return el("tr", {},
+              el("td", { class: "strong" }, p.device),
+              el("td", {}, p.port),
+              el("td", {}, p.up ? `${p.speed ?? "?"} Mbps` : el("span", { class: "pill neutral" }, "DOWN")),
+              el("td", { class: "num", style: errTotal > 1000 ? "color:var(--critical);font-weight:600" : errTotal ? "color:var(--warning)" : "" }, p.rx_errors.toLocaleString()),
+              el("td", { class: "num", style: p.tx_errors ? "color:var(--warning)" : "" }, p.tx_errors.toLocaleString()),
+              el("td", { class: "num" }, p.drops.toLocaleString()));
+          })))));
+  }
+
+  const updates = insights.updates || [];
   const devRows = () => devices.map(d => el("tr", { "data-k": `${d.name} ${d.ip} ${d.model}`.toLowerCase() },
     el("td", { class: "strong" }, d.name || "—"),
     el("td", {}, `${d.model || ""} ${d.type ? `(${d.type})` : ""}`),
     el("td", {}, d.ip || "—"),
     el("td", {}, statePill(d.state)),
+    el("td", {}, d.upgradable
+      ? el("span", { class: "pill warn", title: d.upgrade_to ? `→ ${d.upgrade_to}` : "" }, "UPDATE")
+      : el("span", { class: "mono-dim" }, "current")),
     el("td", { class: "num" }, d.clients ?? "—"),
     el("td", { class: "num" }, d.cpu != null ? `${d.cpu}%` : "—"),
     el("td", { class: "num" }, fmtUptime(d.uptime)),
@@ -122,8 +175,11 @@ async function network(body, toast) {
     el("td", { class: "num" }, fmtUptime(c.uptime))));
 
   const devPanel = el("div", { class: "panel" },
-    el("div", { class: "panel-title" }, `UNIFI DEVICES — ${devices.length}`),
-    tableWrap(["NAME", "MODEL", "IP", "STATE", ">CLIENTS", ">CPU", ">UPTIME", ""], devRows()));
+    el("div", { class: "panel-title" },
+      `UNIFI DEVICES — ${devices.length}`,
+      updates.length ? el("span", { class: "pill warn", style: "margin-left:4px" },
+        `${updates.length} FIRMWARE UPDATE${updates.length > 1 ? "S" : ""} AVAILABLE`) : ""),
+    tableWrap(["NAME", "MODEL", "IP", "STATE", "FIRMWARE", ">CLIENTS", ">CPU", ">UPTIME", ""], devRows()));
 
   const cliPanel = el("div", { class: "panel" },
     el("div", { class: "panel-title" }, `CLIENTS — ${clients.length}`),
@@ -131,6 +187,9 @@ async function network(body, toast) {
 
   body.append(
     toolbar("filter devices & clients…", q => filterRows(body, q)),
+    el("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:14px" },
+      gwPanel, portPanel),
+    el("div", { class: "section-gap" }),
     devPanel, el("div", { class: "section-gap" }), cliPanel);
 }
 
@@ -229,22 +288,18 @@ async function containers(body, toast, overview) {
   const h = overview?.systems?.docker?.data?.host;
   let hostPanel = null;
   if (h) {
+    // single full-width stack: CPU, RAM, GPU, VRAM, then disks
     hostPanel = el("div", { class: "panel" },
-      el("div", { class: "panel-title" }, "DOCKER HOST VITALS — VIA GLANCES"));
-    const cols = el("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:0 24px" });
-    const colA = el("div", {}), colB = el("div", {});
-    colA.append(
+      el("div", { class: "panel-title" }, "DOCKER HOST VITALS — VIA GLANCES"),
       meter("CPU", h.cpu_pct, {}),
       meter("RAM", h.mem_pct, { detail: h.mem_total ? `${fmtBytes(h.mem_used)} / ${fmtBytes(h.mem_total)}` : "" }),
       ...(h.gpus || []).flatMap(g => [
         meter(`GPU ${g.name || ""}`.trim(), g.util_pct,
           { detail: g.temp != null ? `${g.temp}°C` : "" }),
         meter("GPU VRAM", g.mem_pct, {}),
-      ]));
-    colB.append(...(h.disks || []).map(d =>
-      meter(`DISK ${d.mount}`, d.pct, { detail: `${fmtBytes(d.used)} / ${fmtBytes(d.total)}` })));
-    cols.append(colA, colB);
-    hostPanel.append(cols);
+      ]),
+      ...(h.disks || []).map(d =>
+        meter(`DISK ${d.mount}`, d.pct, { detail: `${fmtBytes(d.used)} / ${fmtBytes(d.total)}` })));
   } else if (overview?.systems?.docker?.data?.host_error) {
     hostPanel = el("div", { class: "panel" },
       el("div", { class: "panel-title" }, "DOCKER HOST VITALS"),

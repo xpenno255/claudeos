@@ -117,8 +117,57 @@ def devices(settings: dict) -> list:
             "mem": (d.get("system-stats") or {}).get("mem"),
             "clients": d.get("num_sta"),
             "version": d.get("version"),
+            "upgradable": bool(d.get("upgradable")),
+            "upgrade_to": d.get("upgrade_to_firmware"),
         })
     return out
+
+
+def _num(x):
+    try:
+        return float(str(x).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def insights(settings: dict) -> dict:
+    """Gateway (UDM) health, ports with errors/drops, pending firmware
+    updates — all from one stat/device call."""
+    data = _call(settings, "GET", "/proxy/network/api/s/default/stat/device").get("data", [])
+    gateway, port_issues, updates = None, [], []
+    for d in data:
+        name = d.get("name") or d.get("model")
+        if gateway is None and d.get("type") in ("udm", "ugw", "uxg"):
+            ss = d.get("system-stats") or {}
+            gateway = {
+                "name": name,
+                "model": d.get("model"),
+                "version": d.get("version"),
+                "uptime": d.get("uptime"),
+                "cpu_pct": _num(ss.get("cpu")),
+                "mem_pct": _num(ss.get("mem")),
+                "temps": [{"name": t.get("name"), "value": t.get("value")}
+                          for t in (d.get("temperatures") or []) if t.get("value") is not None],
+            }
+        if d.get("upgradable"):
+            updates.append({"name": name, "model": d.get("model"),
+                            "version": d.get("version"),
+                            "upgrade_to": d.get("upgrade_to_firmware")})
+        for p in d.get("port_table") or []:
+            errors = (p.get("rx_errors") or 0) + (p.get("tx_errors") or 0)
+            drops = (p.get("rx_dropped") or 0) + (p.get("tx_dropped") or 0)
+            if errors + drops > 0:
+                port_issues.append({
+                    "device": name,
+                    "port": p.get("name") or f"Port {p.get('port_idx')}",
+                    "up": bool(p.get("up")),
+                    "speed": p.get("speed"),
+                    "rx_errors": p.get("rx_errors") or 0,
+                    "tx_errors": p.get("tx_errors") or 0,
+                    "drops": drops,
+                })
+    port_issues.sort(key=lambda x: (-(x["rx_errors"] + x["tx_errors"]), -x["drops"]))
+    return {"gateway": gateway, "port_issues": port_issues[:20], "updates": updates}
 
 
 def clients(settings: dict) -> list:
