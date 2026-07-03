@@ -1,0 +1,11 @@
+data/
+.venv/
+.git/
+.github/
+.shots/
+.shotcheck/
+__pycache__/
+**/__pycache__/
+*.pyc
+deploy/
+README.md

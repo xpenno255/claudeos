@@ -1,0 +1,16 @@
+# ClaudeOS on the docker host.
+#   mkdir -p /opt/claudeos && cd /opt/claudeos
+#   curl -fsSLO https://raw.githubusercontent.com/xpenno255/claudeos/main/deploy/compose.yaml
+#   docker compose up -d
+# State (encrypted config, master key, ops log) persists in ./data.
+services:
+  claudeos:
+    image: ghcr.io/xpenno255/claudeos:latest
+    container_name: claudeos
+    restart: unless-stopped
+    ports:
+      - "8321:8321"
+    environment:
+      - TZ=Europe/London
+    volumes:
+      - ./data:/data

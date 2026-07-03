@@ -1,0 +1,5 @@
+# runtime state: master key, encrypted config, ops log — never commit
+data/
+__pycache__/
+*.pyc
+.venv/
