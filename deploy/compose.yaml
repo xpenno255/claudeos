@@ -14,3 +14,7 @@ services:
       - TZ=Europe/London
     volumes:
       - ./data:/data
+      # host folders to make scannable from Containers → SCAN buttons
+      # (read-only; each mount under /scan becomes its own scan root)
+      # - /home/xpenno255:/scan/home:ro
+      # - /mnt/media:/scan/media:ro

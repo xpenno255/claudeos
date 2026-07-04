@@ -41,6 +41,8 @@ export const api = {
   dockerContainers:()            => call("GET",    "/api/docker/containers"),
   dockerAction:    (id, action)  => call("POST",   `/api/docker/containers/${id}/${action}`),
   dockerStorage:   ()            => call("GET",    "/api/docker/storage"),
+  scanRoots:       ()            => call("GET",    "/api/storage/roots"),
+  scanFolder:      (path)        => call("POST",   "/api/storage/scan", { path }),
 
   haEntities:      ()            => call("GET",    "/api/ha/entities"),
   haService:       (payload)     => call("POST",   "/api/ha/service", payload),

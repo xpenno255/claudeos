@@ -48,6 +48,9 @@ The key is encrypted at rest like every other secret.
   *administrator* HA user (supervisor endpoints reject non-admin tokens).
 - **Docker storage analysis** needs `SYSTEM: 1` added to the socket-proxy
   container's environment.
+- **Host folder scans** (du-style largest folders/files) appear when host
+  paths are bind-mounted read-only under `/scan` in the claudeos service,
+  e.g. `- /home/you:/scan/home:ro` — one SCAN button per mount.
 - **ZHA health** uses the HA websocket API — works with the same token.
 
 Disruptive actions require a second confirming click, and everything ClaudeOS

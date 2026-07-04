@@ -284,7 +284,9 @@ async function compute(body, toast) {
 // ------------------------------------------------------------ CONTAINERS
 
 async function containers(body, toast, overview) {
-  const { containers } = await api.dockerContainers();
+  const [{ containers }, scanRootsRes] = await Promise.all([
+    api.dockerContainers(), api.scanRoots().catch(() => ({ roots: [] })),
+  ]);
 
   const h = overview?.systems?.docker?.data?.host;
   let hostPanel = null;
@@ -341,9 +343,29 @@ async function containers(body, toast, overview) {
     }
   });
 
+  // ---- host folder scans (per bind-mounted /scan/<name> root)
+  const scanBtns = (scanRootsRes.roots || []).map(r => {
+    const btn = el("button", { class: "btn" }, `⌂ SCAN /${r.name}`);
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      storageOut.replaceChildren(el("div", { class: "ai-running" },
+        el("div", { class: "spinner" }),
+        `walking ${r.name} — large folders can take a minute or two…`));
+      try {
+        const res = await api.scanFolder(r.path);
+        storageOut.replaceChildren(folderScanReport(r.name, res));
+      } catch (e) {
+        storageOut.replaceChildren(el("div", { class: "setup-result err" }, `✕ ${e.message}`));
+      } finally {
+        btn.disabled = false;
+      }
+    });
+    return btn;
+  });
+
   const running = containers.filter(c => c.state === "running").length;
   body.append(
-    toolbar("filter containers…", q => filterRows(body, q), [analyseBtn]),
+    toolbar("filter containers…", q => filterRows(body, q), [...scanBtns, analyseBtn]),
     ...(hostPanel ? [hostPanel, el("div", { class: "section-gap" })] : []),
     storageOut,
     el("div", { class: "panel" },
@@ -385,11 +407,38 @@ function storageReport(r) {
   return wrap;
 }
 
+function folderScanReport(name, r) {
+  const wrap = el("div", { class: "panel", style: "margin-bottom:14px" },
+    el("div", { class: "panel-title" }, `HOST FOLDER SCAN — /${name}`),
+    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px" },
+      el("span", { class: "pill neutral" }, `total ${fmtBytes(r.total)}`),
+      el("span", { class: "pill neutral" }, `top ${r.dirs.length} folders shown (sizes include subfolders)`),
+      r.skipped ? el("span", { class: "pill warn" }, `${r.skipped} unreadable entries skipped`) : null));
+
+  const cols = el("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:0 24px" });
+  const dirCol = el("div", {}, el("div", { class: "mono-dim", style: "margin:6px 0" }, "LARGEST FOLDERS"));
+  const maxDir = Math.max(...r.dirs.map(d => d.size), 1);
+  for (const d of r.dirs) dirCol.append(barRow(d.path, d.size, maxDir));
+  if (!r.dirs.length) dirCol.append(el("div", { class: "mono-dim" }, "none"));
+
+  const fileCol = el("div", {}, el("div", { class: "mono-dim", style: "margin:6px 0" }, "LARGEST FILES"));
+  const maxFile = Math.max(...r.files.map(f => f.size), 1);
+  for (const f of r.files) fileCol.append(barRow(f.path, f.size, maxFile, true));
+  if (!r.files.length) fileCol.append(el("div", { class: "mono-dim" }, "none"));
+
+  cols.append(dirCol, fileCol);
+  wrap.append(cols);
+  return wrap;
+}
+
 function barRow(label, size, max, dim = false) {
   const row = el("div", { class: "meter" });
-  row.innerHTML = `
-    <div class="meter-label"><span style="${dim ? "opacity:.55" : ""}">${label}</span><b>${fmtBytes(size)}</b></div>
-    <div class="meter-track"><div class="meter-fill" style="width:${(100 * size / max).toFixed(1)}%;background:${dim ? "var(--ink-3)" : "var(--s-docker)"}"></div></div>`;
+  const head = el("div", { class: "meter-label" },
+    el("span", { style: dim ? "opacity:.55" : "" }, label),
+    el("b", {}, fmtBytes(size)));
+  const track = el("div", { class: "meter-track" },
+    el("div", { class: "meter-fill", style: `width:${(100 * size / max).toFixed(1)}%;background:${dim ? "var(--ink-3)" : "var(--s-docker)"}` }));
+  row.append(head, track);
   return row;
 }
 

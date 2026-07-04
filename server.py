@@ -23,7 +23,7 @@ import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from app import ai, oplog, poller, store
+from app import ai, oplog, poller, scanner, store
 from app.connectors import CONNECTORS, docker, homeassistant, proxmox, unifi
 from app.httpclient import HttpError
 
@@ -171,6 +171,20 @@ def route_docker_storage(_m, _p, _b):
     return report
 
 
+def route_scan_roots(_m, _p, _b):
+    return {"roots": scanner.roots()}
+
+
+def route_scan(_m, _p, body):
+    path = (body or {}).get("path", "")
+    if not path:
+        raise ValueError("path is required")
+    result = scanner.scan(path)
+    oplog.add("info", "claudeos", f"host folder scan: {path} "
+              f"({result['total'] / 1e9:.1f} GB)")
+    return result
+
+
 def route_ha_system(_m, _p, _b):
     return homeassistant.system_info(_settings("homeassistant"))
 
@@ -252,6 +266,8 @@ ROUTES = [
     ("GET",    r"^/api/proxmox/storage$",                                 route_proxmox_storage),
     ("GET",    r"^/api/proxmox/perf$",                                    route_proxmox_perf),
     ("GET",    r"^/api/docker/storage$",                                  route_docker_storage),
+    ("GET",    r"^/api/storage/roots$",                                   route_scan_roots),
+    ("POST",   r"^/api/storage/scan$",                                    route_scan),
     ("GET",    r"^/api/ha/system$",                                       route_ha_system),
     ("GET",    r"^/api/ha/zha$",                                          route_ha_zha),
     ("POST",   r"^/api/ha/analyze-logs$",                                 route_ha_analyze_logs),
