@@ -29,6 +29,7 @@ export const api = {
   unifiClients:    ()            => call("GET",    "/api/unifi/clients"),
   unifiInsights:   ()            => call("GET",    "/api/unifi/insights"),
   unifiRestart:    (mac)         => call("POST",   `/api/unifi/devices/${mac}/restart`),
+  unifiUpgrade:    (mac)         => call("POST",   `/api/unifi/devices/${mac}/upgrade`),
 
   proxmoxGuests:   ()            => call("GET",    "/api/proxmox/guests"),
   proxmoxNodes:    ()            => call("GET",    "/api/proxmox/nodes"),

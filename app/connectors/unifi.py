@@ -192,3 +192,12 @@ def restart_device(settings: dict, mac: str) -> dict:
     _call(settings, "POST", "/proxy/network/api/s/default/cmd/devmgr",
           json_body={"cmd": "restart", "mac": mac})
     return {"ok": True, "detail": f"restart sent to {mac}"}
+
+
+def upgrade_device(settings: dict, mac: str) -> dict:
+    """Tell a device to download and install its pending firmware update.
+    The device reboots as part of the upgrade (a few minutes offline)."""
+    _call(settings, "POST", "/proxy/network/api/s/default/cmd/devmgr",
+          json_body={"cmd": "upgrade", "mac": mac})
+    return {"ok": True, "detail": f"firmware upgrade started on {mac} — it will reboot and "
+                                  "show offline for a few minutes"}

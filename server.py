@@ -125,6 +125,12 @@ def route_unifi_restart(_m, p, _b):
     return res
 
 
+def route_unifi_upgrade(_m, p, _b):
+    res = unifi.upgrade_device(_settings("unifi"), p["mac"])
+    oplog.add("action", "unifi", f"firmware upgrade requested: {p['mac']}")
+    return res
+
+
 def route_proxmox_guests(_m, _p, _b):
     return {"guests": proxmox.guests(_settings("proxmox"))}
 
@@ -240,6 +246,7 @@ ROUTES = [
     ("GET",    r"^/api/unifi/clients$",                                   route_unifi_clients),
     ("GET",    r"^/api/unifi/insights$",                                  route_unifi_insights),
     ("POST",   r"^/api/unifi/devices/(?P<mac>[0-9a-fA-F:]+)/restart$",    route_unifi_restart),
+    ("POST",   r"^/api/unifi/devices/(?P<mac>[0-9a-fA-F:]+)/upgrade$",    route_unifi_upgrade),
     ("GET",    r"^/api/proxmox/guests$",                                  route_proxmox_guests),
     ("GET",    r"^/api/proxmox/nodes$",                                   route_proxmox_nodes),
     ("GET",    r"^/api/proxmox/storage$",                                 route_proxmox_storage),

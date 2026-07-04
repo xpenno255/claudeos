@@ -65,8 +65,8 @@ function statePill(state, okStates = ["online", "running", "on", "ok"]) {
 }
 
 // Two-click confirm for anything disruptive.
-function actionBtn(label, run, { danger = false, confirm = true, toast }) {
-  const btn = el("button", { class: `btn btn-mini ${danger ? "btn-danger" : "btn-ghost"}` }, label);
+function actionBtn(label, run, { danger = false, confirm = true, accent = false, toast }) {
+  const btn = el("button", { class: `btn btn-mini ${danger ? "btn-danger" : accent ? "" : "btn-ghost"}` }, label);
   let armed = false, timer = null;
   btn.addEventListener("click", async (e) => {
     e.stopPropagation();
@@ -158,7 +158,8 @@ async function network(body, toast) {
     el("td", {}, d.ip || "—"),
     el("td", {}, statePill(d.state)),
     el("td", {}, d.upgradable
-      ? el("span", { class: "pill warn", title: d.upgrade_to ? `→ ${d.upgrade_to}` : "" }, "UPDATE")
+      ? el("span", { title: d.upgrade_to ? `→ ${d.upgrade_to}` : "" },
+          actionBtn("⬆ UPDATE", () => api.unifiUpgrade(d.mac), { accent: true, toast }))
       : el("span", { class: "mono-dim" }, "current")),
     el("td", { class: "num" }, d.clients ?? "—"),
     el("td", { class: "num" }, d.cpu != null ? `${d.cpu}%` : "—"),
