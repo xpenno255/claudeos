@@ -80,6 +80,28 @@ ZHA_SCHEMA = {
 }
 
 
+EVENT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "summary": {"type": "string",
+                    "description": "1-2 plain-English sentences: what actually happened"},
+        "threat_level": {"type": "string",
+                         "enum": ["none", "low", "medium", "high", "critical"],
+                         "description": "realistic risk to THIS network, not the raw alert severity"},
+        "action_needed": {"type": "boolean",
+                          "description": "true only if the user should actually do something"},
+        "explanation": {"type": "string",
+                        "description": "what the event means, whether it is routine/noise or genuinely "
+                                       "concerning, and why — reference the specific IPs/devices involved"},
+        "recommendation": {"type": "string",
+                           "description": "concrete next steps (UniFi UI paths, firewall rules, device checks), "
+                                          "or explicitly 'no action needed' with the reason"},
+    },
+    "required": ["summary", "threat_level", "action_needed", "explanation", "recommendation"],
+}
+
+
 def _settings() -> dict:
     s = store.get_system("ai", reveal_secrets=True)
     if not s or not s.get("api_key"):
@@ -238,6 +260,27 @@ offline or flaky devices, interference signs, and improvement opportunities (rou
 placement, adding repeaters, channel issues, battery replacements). Grade the mesh
 A-F. Findings must be specific to the devices named in the data. Recommendations must
 be actionable for a homelab user."""
+
+
+EVENT_SYSTEM_PROMPT = """You are a network security analyst triaging a single event from a UniFi
+gateway (UDM-SE) protecting a homelab. The owner is technical but not a security
+professional; internet-facing scans and blocked intrusion attempts are constant
+background noise on any residential connection.
+
+Rules:
+- Judge the REAL risk to this network, not the alert's own severity label. A blocked
+  inbound scan from the internet is routine (the IPS did its job); the same signature
+  from an INTERNAL host, or outbound traffic to a known-bad destination, is serious.
+- 192.168.x.x addresses are internal LAN/VLANs; anything else is external.
+- Say clearly whether this is noise or needs action. Most single blocked events are noise.
+- Recommendations must be concrete: the UniFi UI path, the firewall rule to add, the
+  device to inspect — or an explicit "no action needed" with the reason."""
+
+
+def analyze_unifi_event(event: dict, context: str) -> dict:
+    user = (f"Network context: {context}\n\n"
+            f"UniFi event to triage:\n```json\n{json.dumps(event, indent=1)[:8000]}\n```")
+    return ask_json(EVENT_SYSTEM_PROMPT, user, EVENT_SCHEMA, max_tokens=4000)
 
 
 def analyze_ha_logs(log_text: str, context: str) -> dict:

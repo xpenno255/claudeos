@@ -6,6 +6,7 @@ cached per-process and refreshed on 401.
 Recommended: create a dedicated read/limited local admin on the UDM for this.
 """
 
+import re
 import threading
 import time
 
@@ -185,6 +186,73 @@ def clients(settings: dict) -> list:
             "uptime": c.get("uptime"),
         })
     out.sort(key=lambda c: (c["wired"], (c["name"] or "").lower()))
+    return out
+
+
+def _render_msg(raw: str, params: dict) -> str:
+    """Fill a v2 system-log template ("{SRC_IP} blocked…") from its
+    parameters map, preferring human names over ids."""
+    def sub(m):
+        p = (params or {}).get(m.group(1))
+        if isinstance(p, dict):
+            return str(p.get("name") or p.get("hostname") or p.get("id") or m.group(0))
+        return str(p) if p is not None else m.group(0)
+    return re.sub(r"\{([A-Z0-9_]+)\}", sub, raw or "")
+
+
+def events(settings: dict, categories: list | None = None,
+           page: int = 0, page_size: int = 50) -> dict:
+    """Site events from the v2 system-log (the feed the UniFi UI uses).
+
+    Verified live on UDM-SE fw 5.1.25 (2026-07-16): the v1 endpoints
+    stat/event, list/alarm and stat/ips/event are gone; IDS/IPS blocks
+    appear here as category SECURITY / subcategory
+    SECURITY_INTRUSION_PREVENTION. The categories filter is server-side.
+    """
+    body = {"pageNumber": int(page), "pageSize": int(page_size)}
+    if categories:
+        body["categories"] = categories
+    r = _call(settings, "POST",
+              "/proxy/network/v2/api/site/default/system-log/all", json_body=body)
+    out = []
+    for x in r.get("data", []):
+        out.append({
+            "id": x.get("id"),
+            "ts": (x.get("timestamp") or 0) / 1000,
+            "category": x.get("category"),
+            "subcategory": x.get("subcategory"),
+            "event": x.get("event"),
+            "severity": x.get("severity"),
+            "status": x.get("status"),
+            "title": _render_msg(x.get("title_raw"), x.get("parameters")),
+            "message": _render_msg(x.get("message_raw"), x.get("parameters")),
+            "raw": x,  # full row, fed to the AI triage
+        })
+    return {"events": out, "total": r.get("total_element_count"),
+            "pages": r.get("total_page_count"), "page": r.get("page_number")}
+
+
+def anomalies(settings: dict) -> list:
+    """Client anomalies (stat/anomalies — still v1, verified working).
+    Rows come as {anomaly, mac, timestamps}; enrich with client names."""
+    rows = _call(settings, "GET",
+                 "/proxy/network/api/s/default/stat/anomalies").get("data", [])
+    names = {}
+    try:
+        names = {c["mac"]: c["name"] for c in clients(settings) if c.get("mac")}
+    except Exception:  # noqa: BLE001 — names are a nicety, not a requirement
+        pass
+    out = []
+    for a in rows:
+        stamps = a.get("timestamps") or []
+        out.append({
+            "anomaly": a.get("anomaly"),
+            "mac": a.get("mac"),
+            "client": names.get(a.get("mac")) or a.get("mac"),
+            "count": len(stamps),
+            "last_ts": max(stamps) / 1000 if stamps else None,
+        })
+    out.sort(key=lambda x: -(x["last_ts"] or 0))
     return out
 
 

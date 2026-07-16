@@ -115,6 +115,31 @@ def route_unifi_insights(_m, _p, _b):
     return unifi.insights(_settings("unifi"))
 
 
+def route_unifi_events(_m, _p, body):
+    body = body or {}
+    return unifi.events(_settings("unifi"),
+                        categories=body.get("categories"),
+                        page=body.get("page", 0),
+                        page_size=body.get("page_size", 50))
+
+
+def route_unifi_anomalies(_m, _p, _b):
+    return {"anomalies": unifi.anomalies(_settings("unifi"))}
+
+
+def route_unifi_event_analyze(_m, _p, body):
+    ev = (body or {}).get("event")
+    if not ev:
+        raise ValueError("event is required")
+    snap = poller.snapshot().get("unifi", {}).get("data") or {}
+    context = (f"UniFi UDM-SE gateway for a homelab; internal subnets are 192.168.x.x; "
+               f"{snap.get('clients', '?')} clients online, WAN status {snap.get('wan_status', '?')}")
+    result = ai.analyze_unifi_event(ev, context)
+    oplog.add("action", "unifi",
+              f"AI event triage: {ev.get('event') or ev.get('id')} → {result.get('threat_level')}")
+    return result
+
+
 def route_unifi_restart(_m, p, _b):
     res = unifi.restart_device(_settings("unifi"), p["mac"])
     oplog.add("action", "unifi", f"device restart requested: {p['mac']}")
@@ -287,6 +312,9 @@ ROUTES = [
     ("GET",    r"^/api/unifi/devices$",                                   route_unifi_devices),
     ("GET",    r"^/api/unifi/clients$",                                   route_unifi_clients),
     ("GET",    r"^/api/unifi/insights$",                                  route_unifi_insights),
+    ("POST",   r"^/api/unifi/events$",                                    route_unifi_events),
+    ("GET",    r"^/api/unifi/anomalies$",                                 route_unifi_anomalies),
+    ("POST",   r"^/api/unifi/events/analyze$",                            route_unifi_event_analyze),
     ("POST",   r"^/api/unifi/devices/(?P<mac>[0-9a-fA-F:]+)/restart$",    route_unifi_restart),
     ("POST",   r"^/api/unifi/devices/(?P<mac>[0-9a-fA-F:]+)/upgrade$",    route_unifi_upgrade),
     ("GET",    r"^/api/proxmox/guests$",                                  route_proxmox_guests),

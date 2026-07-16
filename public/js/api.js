@@ -28,6 +28,9 @@ export const api = {
   unifiDevices:    ()            => call("GET",    "/api/unifi/devices"),
   unifiClients:    ()            => call("GET",    "/api/unifi/clients"),
   unifiInsights:   ()            => call("GET",    "/api/unifi/insights"),
+  unifiEvents:     (q)           => call("POST",   "/api/unifi/events", q || {}),
+  unifiAnomalies:  ()            => call("GET",    "/api/unifi/anomalies"),
+  unifiTriage:     (event)       => call("POST",   "/api/unifi/events/analyze", { event }),
   unifiRestart:    (mac)         => call("POST",   `/api/unifi/devices/${mac}/restart`),
   unifiUpgrade:    (mac)         => call("POST",   `/api/unifi/devices/${mac}/upgrade`),
 

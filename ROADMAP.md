@@ -17,11 +17,14 @@ caveats noted at the bottom.
    buffer history, Ops → UPTIME tab (add/pause/remove, response sparklines,
    24h uptime %). Alerts via the notification layer after 2 consecutive
    failures, recover alert on first success.
-3. **UniFi events & IDS feed + Claude triage** — site events
-   (`/stat/event`), alarms (`/list/alarm`), IDS/IPS events
-   (`/stat/ips/event`), anomalies (`/stat/anomalies`) via the existing
-   session (all under `/proxy/network` on UDM-SE). Live events panel +
-   "Analyze with Claude" per alert. ⚠ community-documented API.
+3. ✅ **UniFi events & IDS feed + Claude triage** *(shipped 2026-07-16)* —
+   live probe found v1 `stat/event` / `list/alarm` / `stat/ips/event` GONE
+   on UDM-SE fw 5.1.25; the working feed is
+   `POST /proxy/network/v2/api/site/default/system-log/all`
+   (`{pageNumber, pageSize, categories:["SECURITY"]}` — server-side filter,
+   IPS blocks are subcategory SECURITY_INTRUSION_PREVENTION); v1
+   `stat/anomalies` still works. EVENTS & THREATS panel on Ops → NETWORK
+   with per-event "◈ TRIAGE" (Claude judges real risk vs alert severity).
 4. **Scheduled AI health report** — weekly cron feeds Claude the metric
    history, events, port errors, ZHA health, backup status → ranked digest
    delivered via ntfy/email. (Netdata ships this as a paid feature —

@@ -102,9 +102,11 @@ function actionBtn(label, run, { danger = false, confirm = true, accent = false,
 // ------------------------------------------------------------ NETWORK
 
 async function network(body, toast) {
-  const [{ devices }, { clients }, insights] = await Promise.all([
+  const [{ devices }, { clients }, insights, eventsRes, anomaliesRes] = await Promise.all([
     api.unifiDevices(), api.unifiClients(),
     api.unifiInsights().catch(e => ({ error: String(e.message || e) })),
+    api.unifiEvents({ categories: ["SECURITY"] }).catch(e => ({ error: String(e.message || e) })),
+    api.unifiAnomalies().catch(() => ({ anomalies: [] })),
   ]);
 
   // ---- gateway (UDM-SE) health
@@ -193,7 +195,146 @@ async function network(body, toast) {
     el("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:14px" },
       gwPanel, portPanel),
     el("div", { class: "section-gap" }),
+    eventsPanel(eventsRes, anomaliesRes.anomalies || [], toast),
+    el("div", { class: "section-gap" }),
     devPanel, el("div", { class: "section-gap" }), cliPanel);
+}
+
+// ------------------------------------------------- NETWORK: events & IDS
+
+const EVT_FILTERS = [
+  { label: "THREATS & SECURITY", cats: ["SECURITY"] },
+  { label: "ALL EVENTS", cats: null },
+];
+
+function eventsPanel(initial, anomalies, toast) {
+  const panel = el("div", { class: "panel" },
+    el("div", { class: "panel-title" }, "EVENTS & THREATS — GATEWAY LOG"));
+  if (initial.error) {
+    panel.append(el("div", { class: "mono-dim" }, `⚠ ${initial.error}`));
+    return panel;
+  }
+
+  let cats = EVT_FILTERS[0].cats;
+  let page = 0;
+  const tbody = el("tbody", {});
+  const countEl = el("span", { class: "mono-dim" }, "");
+
+  // ---- filter chips
+  const chips = EVT_FILTERS.map((f, i) => {
+    const b = el("button", { class: `btn btn-mini ${i === 0 ? "" : "btn-ghost"}` }, f.label);
+    b.addEventListener("click", async () => {
+      chips.forEach(c => c.className = "btn btn-mini btn-ghost");
+      b.className = "btn btn-mini";
+      cats = f.cats;
+      page = 0;
+      tbody.replaceChildren();
+      await load();
+    });
+    return b;
+  });
+
+  const moreBtn = el("button", { class: "btn btn-mini btn-ghost" }, "LOAD OLDER ▾");
+  moreBtn.addEventListener("click", async () => { page += 1; await load(); });
+
+  async function load() {
+    moreBtn.disabled = true;
+    try {
+      const r = await api.unifiEvents({ categories: cats, page });
+      addRows(r.events);
+      countEl.textContent = `${r.total ?? "?"} total · page ${page + 1}/${r.pages ?? "?"}`;
+      moreBtn.style.display = r.pages && page + 1 >= r.pages ? "none" : "";
+    } catch (e) {
+      toast(String(e.message || e), "err", "EVENTS");
+    } finally {
+      moreBtn.disabled = false;
+    }
+  }
+
+  function addRows(events) {
+    for (const ev of events) {
+      const sevCls = ev.severity === "HIGH" ? "err" : ev.severity === "MEDIUM" ? "warn" : "neutral";
+      const triageBtn = el("button", { class: "btn btn-mini btn-ghost" }, "◈ TRIAGE");
+      const row = el("tr", {},
+        el("td", { class: "mono-dim", style: "white-space:nowrap" },
+          new Date(ev.ts * 1000).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })),
+        el("td", {}, el("span", { class: `pill ${sevCls}` }, ev.severity || "?")),
+        el("td", { class: "mono-dim" }, (ev.subcategory || ev.category || "").replace(/^SECURITY_?/, "").replace(/_/g, " ").toLowerCase() || "—"),
+        el("td", {}, ev.message || ev.title || ev.event),
+        el("td", {}, triageBtn));
+      tbody.append(row);
+
+      triageBtn.addEventListener("click", async () => {
+        triageBtn.disabled = true;
+        const out = el("td", { colspan: "5" },
+          el("div", { class: "ai-running" }, el("div", { class: "spinner" }),
+            "Claude is triaging this event…"));
+        const detail = el("tr", {}, out);
+        row.after(detail);
+        try {
+          const r = await api.unifiTriage(ev.raw || ev);
+          out.replaceChildren(triageCard(r));
+          triageBtn.textContent = "✓ TRIAGED";
+        } catch (e) {
+          detail.remove();
+          triageBtn.disabled = false;
+          toast(String(e.message || e), "err", "TRIAGE FAILED");
+        }
+      });
+    }
+  }
+
+  // ---- client anomalies strip (stat/anomalies)
+  let anomalyBits = [];
+  if (anomalies.length) {
+    const list = el("div", { style: "display:none" },
+      el("div", { class: "table-wrap", style: "max-height:200px;overflow-y:auto;margin-bottom:10px" },
+        el("table", {},
+          el("thead", {}, el("tr", {}, ...["CLIENT", "ANOMALY", ">COUNT", "LAST SEEN"].map(h =>
+            el("th", { class: h.startsWith(">") ? "num" : "" }, h.replace(/^>/, ""))))),
+          el("tbody", {}, ...anomalies.map(a => el("tr", {},
+            el("td", { class: "strong" }, a.client),
+            el("td", {}, (a.anomaly || "").replace(/_/g, " ").toLowerCase()),
+            el("td", { class: "num" }, a.count),
+            el("td", { class: "mono-dim" }, a.last_ts
+              ? new Date(a.last_ts * 1000).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+              : "—")))))));
+    const chip = el("button", { class: "btn btn-mini btn-ghost" }, `⚠ ${anomalies.length} CLIENT ANOMALIES ▾`);
+    chip.addEventListener("click", () => {
+      list.style.display = list.style.display === "none" ? "" : "none";
+    });
+    anomalyBits = [chip, list];
+  }
+
+  panel.append(
+    el("div", { class: "ops-toolbar", style: "margin-bottom:8px" },
+      ...chips, anomalyBits[0] || null, el("div", { class: "spacer" }), countEl),
+    anomalyBits[1] || null,
+    el("div", { class: "table-wrap", style: "max-height:420px;overflow-y:auto" },
+      el("table", {},
+        el("thead", {}, el("tr", {}, ...["TIME", "SEVERITY", "TYPE", "EVENT", ""].map(h => el("th", {}, h)))),
+        tbody)),
+    el("div", { style: "margin-top:8px" }, moreBtn));
+
+  addRows(initial.events || []);
+  countEl.textContent = `${initial.total ?? "?"} total · page 1/${initial.pages ?? "?"}`;
+  if (initial.pages && initial.pages <= 1) moreBtn.style.display = "none";
+  return panel;
+}
+
+function triageCard(r) {
+  const lvl = r.threat_level || "?";
+  const cls = ["high", "critical"].includes(lvl) ? "err" : lvl === "medium" ? "warn" : "ok";
+  return el("div", { class: "finding", style: "margin:4px 0" },
+    el("div", { class: "finding-head" },
+      el("span", { class: `pill ${cls}` }, `THREAT: ${lvl.toUpperCase()}`),
+      el("span", { class: `pill ${r.action_needed ? "warn" : "ok"}` },
+        r.action_needed ? "ACTION NEEDED" : "NO ACTION NEEDED"),
+      el("span", { class: "finding-title" }, r.summary || "")),
+    el("div", { class: "finding-detail" }, r.explanation || ""),
+    el("div", { class: "finding-fix" }, r.recommendation || ""),
+    r._usage ? el("div", { class: "mono-dim", style: "margin-top:4px;font-size:10px" },
+      `claude-opus-4-8 · ${r._usage.input_tokens} in / ${r._usage.output_tokens} out tokens`) : null);
 }
 
 // ------------------------------------------------------------ COMPUTE
