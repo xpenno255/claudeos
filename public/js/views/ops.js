@@ -223,18 +223,30 @@ function eventsPanel(initial, anomalies, toast) {
   const tbody = el("tbody", {});
   const countEl = el("span", { class: "mono-dim" }, "");
 
-  // ---- filter chips
+  // ---- filter chips — client anomalies is a tab like the rest
+  const setActive = (b) => allChips.forEach(c => c.className = `btn btn-mini ${c === b ? "" : "btn-ghost"}`);
   const chips = EVT_FILTERS.map((f, i) => {
     const b = el("button", { class: `btn btn-mini ${i === 0 ? "" : "btn-ghost"}` }, f.label);
     b.addEventListener("click", () => {
-      chips.forEach(c => c.className = "btn btn-mini btn-ghost");
-      b.className = "btn btn-mini";
+      setActive(b);
+      anomWrap.style.display = "none";
+      eventsWrap.style.display = "";
       cats = f.cats;
       page = 0;
       load(true);
     });
     return b;
   });
+  const anomChip = el("button", { class: "btn btn-mini btn-ghost" },
+    `CLIENT ANOMALIES${anomalies.length ? ` (${anomalies.length})` : ""}`);
+  anomChip.addEventListener("click", () => {
+    setActive(anomChip);
+    seq += 1;  // drop any in-flight event load
+    eventsWrap.style.display = "none";
+    anomWrap.style.display = "";
+    countEl.textContent = `${anomalies.length} anomalous client${anomalies.length === 1 ? "" : "s"}`;
+  });
+  const allChips = [...chips, anomChip];
 
   const moreBtn = el("button", { class: "btn btn-mini btn-ghost" }, "LOAD OLDER ▾");
   moreBtn.addEventListener("click", () => { page += 1; load(false); });
@@ -297,37 +309,34 @@ function eventsPanel(initial, anomalies, toast) {
     }
   }
 
-  // ---- client anomalies strip (stat/anomalies)
-  let anomalyBits = [];
-  if (anomalies.length) {
-    const list = el("div", { style: "display:none" },
-      el("div", { class: "table-wrap", style: "max-height:200px;overflow-y:auto;margin-bottom:10px" },
-        el("table", {},
-          el("thead", {}, el("tr", {}, ...["CLIENT", "ANOMALY", ">COUNT", "LAST SEEN"].map(h =>
-            el("th", { class: h.startsWith(">") ? "num" : "" }, h.replace(/^>/, ""))))),
-          el("tbody", {}, ...anomalies.map(a => el("tr", {},
-            el("td", { class: "strong" }, a.client),
-            el("td", {}, (a.anomaly || "").replace(/_/g, " ").toLowerCase()),
-            el("td", { class: "num" }, a.count),
-            el("td", { class: "mono-dim" }, a.last_ts
-              ? new Date(a.last_ts * 1000).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
-              : "—")))))));
-    const chip = el("button", { class: "btn btn-mini btn-ghost" }, `⚠ ${anomalies.length} CLIENT ANOMALIES ▾`);
-    chip.addEventListener("click", () => {
-      list.style.display = list.style.display === "none" ? "" : "none";
-    });
-    anomalyBits = [chip, list];
-  }
+  // ---- anomalies tab content (stat/anomalies — fetched once per render)
+  const anomWrap = el("div", { style: "display:none" },
+    anomalies.length
+      ? el("div", { class: "table-wrap", style: "max-height:420px;overflow-y:auto" },
+          el("table", {},
+            el("thead", {}, el("tr", {}, ...["CLIENT", "ANOMALY", ">COUNT", "LAST SEEN"].map(h =>
+              el("th", { class: h.startsWith(">") ? "num" : "" }, h.replace(/^>/, ""))))),
+            el("tbody", {}, ...anomalies.map(a => el("tr", {},
+              el("td", { class: "strong" }, a.client),
+              el("td", {}, (a.anomaly || "").replace(/_/g, " ").toLowerCase()),
+              el("td", { class: "num" }, a.count),
+              el("td", { class: "mono-dim" }, a.last_ts
+                ? new Date(a.last_ts * 1000).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+                : "—"))))))
+      : el("div", { class: "pill ok" }, "● NO CLIENT ANOMALIES DETECTED"));
 
-  panel.append(
-    el("div", { class: "ops-toolbar", style: "margin-bottom:8px" },
-      ...chips, anomalyBits[0] || null, el("div", { class: "spacer" }), countEl),
-    anomalyBits[1] || null,
+  const eventsWrap = el("div", {},
     el("div", { class: "table-wrap", style: "max-height:420px;overflow-y:auto" },
       el("table", {},
         el("thead", {}, el("tr", {}, ...["TIME", "SEVERITY", "TYPE", "EVENT", ""].map(h => el("th", {}, h)))),
         tbody)),
     el("div", { style: "margin-top:8px" }, moreBtn));
+
+  panel.append(
+    el("div", { class: "ops-toolbar", style: "margin-bottom:8px" },
+      ...allChips, el("div", { class: "spacer" }), countEl),
+    eventsWrap,
+    anomWrap);
 
   addRows(initial.events || []);
   countEl.textContent = `${initial.total ?? "?"} total · page 1/${initial.pages ?? "?"}`;
