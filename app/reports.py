@@ -18,7 +18,7 @@ import secrets
 import threading
 import time
 
-from . import ai, monitors, notify, oplog, poller, store
+from . import ai, monitors, notify, oplog, poller, smart, store
 from .connectors import docker, homeassistant, proxmox, unifi
 from .store import DATA_DIR
 
@@ -126,10 +126,12 @@ def collect() -> dict:
         }
 
     if (s := _sys("proxmox")):
+        disks = _try(smart.get)
         data["systems"]["proxmox"] = {
             "summary": _try(proxmox.summary, s),
             "nodes": _try(proxmox.nodes, s),
             "storage": _try(proxmox.storage, s),
+            "disk_smart": disks.get("disks", disks) if isinstance(disks, dict) else disks,
         }
 
     if (s := _sys("docker")):

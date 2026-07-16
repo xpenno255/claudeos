@@ -38,6 +38,8 @@ export const api = {
   proxmoxNodes:    ()            => call("GET",    "/api/proxmox/nodes"),
   proxmoxStorage:  ()            => call("GET",    "/api/proxmox/storage"),
   proxmoxPerf:     ()            => call("GET",    "/api/proxmox/perf"),
+  proxmoxDisks:    ()            => call("GET",    "/api/proxmox/disks"),
+  proxmoxDisksRefresh: ()        => call("POST",   "/api/proxmox/disks/refresh"),
   proxmoxAction:   (node, type, vmid, action) =>
     call("POST", `/api/proxmox/guests/${node}/${type}/${vmid}/${action}`),
 

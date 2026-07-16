@@ -23,7 +23,7 @@ import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from app import ai, monitors, notify, oplog, poller, reports, scanner, store
+from app import ai, monitors, notify, oplog, poller, reports, scanner, smart, store
 from app.connectors import CONNECTORS, docker, homeassistant, proxmox, unifi
 from app.httpclient import HttpError
 
@@ -186,6 +186,16 @@ def route_proxmox_perf(_m, _p, _b):
     return {"perf": proxmox.perf(_settings("proxmox"))}
 
 
+def route_proxmox_disks(_m, _p, _b):
+    return smart.get()
+
+
+def route_proxmox_disks_refresh(_m, _p, _b):
+    disks = smart.sweep()
+    oplog.add("info", "smart", f"manual SMART sweep: {len(disks)} disk(s) checked")
+    return smart.get()
+
+
 def route_docker_storage(_m, _p, _b):
     report = docker.storage_report(_settings("docker"))
     oplog.add("info", "docker", "storage analysis run")
@@ -337,6 +347,8 @@ ROUTES = [
     ("GET",    r"^/api/proxmox/nodes$",                                   route_proxmox_nodes),
     ("GET",    r"^/api/proxmox/storage$",                                 route_proxmox_storage),
     ("GET",    r"^/api/proxmox/perf$",                                    route_proxmox_perf),
+    ("GET",    r"^/api/proxmox/disks$",                                   route_proxmox_disks),
+    ("POST",   r"^/api/proxmox/disks/refresh$",                           route_proxmox_disks_refresh),
     ("GET",    r"^/api/docker/storage$",                                  route_docker_storage),
     ("GET",    r"^/api/storage/roots$",                                   route_scan_roots),
     ("POST",   r"^/api/storage/scan$",                                    route_scan),
@@ -455,6 +467,7 @@ def main():
     poller.start()
     monitors.start()
     reports.start()
+    smart.start()
     oplog.add("info", "claudeos", f"server started on {args.host}:{args.port}")
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"\n  ┌─ CLAUDEOS ── homelab mission control")

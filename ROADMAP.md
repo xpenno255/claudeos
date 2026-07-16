@@ -33,10 +33,13 @@ caveats noted at the bottom.
    delivered via notification channels, last 12 reports kept in
    data/reports.json, Ops → REPORTS tab (schedule config + run-now +
    report history). Email deferred — deliverable via any notify channel.
-5. **SMART disk health** — Scrutiny-style attribute tracking with
-   real-failure-rate thresholds. First step: probe Proxmox
-   `/api2/json/nodes/{node}/disks/smart` with the existing token to see if
-   attributes suffice; else tiny agent/cron on the PVE host.
+5. ✅ **SMART disk health** *(shipped 2026-07-16)* — the Proxmox API probe
+   succeeded with the existing token (no agent needed): `disks/list` gives
+   health/wearout, `disks/smart` gives ATA attribute tables or raw NVMe
+   text. `app/smart.py` parses both, evaluates Scrutiny-style
+   (realloc/pending sectors, critical warning, spare, media errors,
+   endurance, temp), sweeps 6-hourly, alerts on status transitions, feeds
+   the AI health report, and renders a DISK HEALTH panel on Ops → COMPUTE.
 
 ## Backlog (validated, unordered)
 

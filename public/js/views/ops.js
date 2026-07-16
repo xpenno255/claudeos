@@ -341,10 +341,11 @@ function triageCard(r) {
 // ------------------------------------------------------------ COMPUTE
 
 async function compute(body, toast) {
-  const [{ nodes }, { guests }, storageRes, perfRes] = await Promise.all([
+  const [{ nodes }, { guests }, storageRes, perfRes, disksRes] = await Promise.all([
     api.proxmoxNodes(), api.proxmoxGuests(),
     api.proxmoxStorage().catch(e => ({ error: String(e.message || e) })),
     api.proxmoxPerf().catch(e => ({ error: String(e.message || e) })),
+    api.proxmoxDisks().catch(e => ({ error: String(e.message || e) })),
   ]);
 
   const nodePanel = el("div", { class: "panel" },
@@ -420,9 +421,69 @@ async function compute(body, toast) {
     el("div", { class: "section-gap" }),
     el("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:14px" }, storagePanel, perfPanel),
     el("div", { class: "section-gap" }),
+    diskPanel(disksRes, toast),
+    el("div", { class: "section-gap" }),
     el("div", { class: "panel" },
       el("div", { class: "panel-title" }, `VIRTUAL MACHINES & CONTAINERS — ${guests.length}`),
       tableWrap([">VMID", "NAME", "TYPE", "NODE", "STATE", ">CPU", ">MEM", ">UPTIME", ""], guestRows)));
+}
+
+// -------------------------------------------------- COMPUTE: disk health
+
+function diskPanel(res, toast) {
+  const panel = el("div", { class: "panel" });
+  const title = el("div", { class: "panel-title" }, "DISK HEALTH — SMART");
+  panel.append(title);
+  if (res.error) {
+    panel.append(el("div", { class: "mono-dim" }, `⚠ ${res.error}`));
+    return panel;
+  }
+  const disks = res.disks || [];
+  const checked = res.ts ? new Date(res.ts * 1000).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
+
+  const refreshBtn = el("button", { class: "btn btn-mini btn-ghost" }, "⟳ RE-CHECK");
+  refreshBtn.addEventListener("click", async () => {
+    refreshBtn.disabled = true;
+    refreshBtn.textContent = "… CHECKING";
+    try {
+      await api.proxmoxDisksRefresh();
+      location.reload();
+    } catch (e) {
+      toast(String(e.message || e), "err", "SMART");
+      refreshBtn.disabled = false;
+      refreshBtn.textContent = "⟳ RE-CHECK";
+    }
+  });
+  title.append(
+    el("span", { class: `pill ${disks.some(d => d.status === "fail") ? "err" : disks.some(d => d.status === "warn") ? "warn" : "ok"}` },
+      disks.every(d => d.status === "ok") ? "● ALL HEALTHY" : disks.filter(d => d.status !== "ok").length + " NEED ATTENTION"),
+    el("span", { class: "mono-dim", style: "margin-left:auto;letter-spacing:0" }, `checked ${checked}`),
+    refreshBtn);
+
+  const rows = disks.map(d => {
+    const cls = d.status === "fail" ? "err" : d.status === "warn" ? "warn" : "ok";
+    const temp = d.detail?.temperature;
+    const wear = d.wearout != null ? `${100 - d.wearout}%` :
+      d.detail?.percentage_used != null ? `${d.detail.percentage_used}%` : "—";
+    const hours = d.detail?.power_on_hours;
+    return el("tr", {},
+      el("td", {}, el("span", { class: `pill ${cls}` }, d.status === "ok" ? "● OK" : d.status.toUpperCase())),
+      el("td", { class: "strong" }, d.devpath),
+      el("td", {}, `${d.model || "?"}`),
+      el("td", {}, el("span", { class: "pill neutral" }, (d.type || "?").toUpperCase()), ` ${d.used_as || ""}`),
+      el("td", { class: "num" }, fmtBytes(d.size)),
+      el("td", { class: "num", style: temp >= 60 ? "color:var(--warning)" : "" }, temp != null ? `${temp}°C` : "—"),
+      el("td", { class: "num" }, wear),
+      el("td", { class: "num" }, hours != null ? `${Math.round(hours / 24)}d` : "—"),
+      el("td", { class: d.issues?.length ? "" : "mono-dim" },
+        d.issues?.length ? d.issues.join("; ") : "no issues"));
+  });
+
+  panel.append(
+    el("div", { class: "mono-dim", style: "margin-bottom:8px" },
+      "wear = endurance used (NVMe percentage-used / PVE wearout). Checked every 6 h; status changes alert via your notification channels."),
+    tableWrap(["", "DEVICE", "MODEL", "TYPE", ">SIZE", ">TEMP", ">WEAR", ">POWER-ON", "ISSUES"], rows));
+  return panel;
 }
 
 // ------------------------------------------------------------ CONTAINERS

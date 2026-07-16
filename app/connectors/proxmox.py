@@ -190,3 +190,16 @@ def guest_action(settings: dict, node: str, gtype: str, vmid: str, action: str) 
         raise ValueError(f"unsupported guest type: {gtype}")
     data = _call(settings, "POST", f"/nodes/{node}/{gtype}/{vmid}/status/{action}")
     return {"ok": True, "detail": f"{action} task {data.get('data', '')} started for {gtype}/{vmid}"}
+
+
+def disk_list(settings: dict, node: str) -> list:
+    """Physical disks on a node (health/wearout come from PVE's smartctl)."""
+    return _call(settings, "GET", f"/nodes/{node}/disks/list").get("data", [])
+
+
+def disk_smart(settings: dict, node: str, devpath: str) -> dict:
+    """SMART detail for one disk: structured `attributes` for ATA drives,
+    raw smartctl `text` for NVMe (verified on PVE 8, 2026-07-16)."""
+    import urllib.parse
+    q = urllib.parse.quote(devpath, safe="")
+    return _call(settings, "GET", f"/nodes/{node}/disks/smart?disk={q}").get("data", {})
