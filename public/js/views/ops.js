@@ -12,6 +12,7 @@ const TABS = [
   { tab: "containers", label: "CONTAINERS", sys: "docker" },
   { tab: "home",       label: "HOME",       sys: "homeassistant" },
   { tab: "uptime",     label: "UPTIME",     sys: null },  // service monitors — not tied to one system
+  { tab: "reports",    label: "REPORTS",    sys: null },  // scheduled AI health reports
 ];
 
 export async function renderOps(root, args, { toast }) {
@@ -40,7 +41,7 @@ export async function renderOps(root, args, { toast }) {
     return;
   }
 
-  const renderers = { network, compute, containers, home, uptime };
+  const renderers = { network, compute, containers, home, uptime, reports };
   await renderers[active](body, toast, overview);
 }
 
@@ -937,6 +938,115 @@ function monitorForm(toast) {
     tlsField,
     el("div", { class: "setup-actions" }, saveBtn),
     result);
+}
+
+// ------------------------------------------------------------ REPORTS
+
+const DAY_NAMES = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"];
+
+async function reports(body, toast) {
+  const state = await api.reports();
+  const cfg = state.config || {};
+
+  // ---- schedule panel
+  const enabled = el("input", { type: "checkbox" });
+  enabled.checked = cfg.enabled === true;
+  const day = el("select", { class: "search" },
+    ...DAY_NAMES.map((d, i) => el("option", { value: String(i) }, d)));
+  day.value = String(cfg.day ?? 0);
+  const hour = el("select", { class: "search" },
+    ...Array.from({ length: 24 }, (_, h) => el("option", { value: String(h) }, `${String(h).padStart(2, "0")}:00`)));
+  hour.value = String(cfg.hour ?? 8);
+
+  const saveBtn = el("button", { class: "btn" }, "SAVE SCHEDULE");
+  saveBtn.addEventListener("click", async () => {
+    try {
+      await api.reportConfig({ enabled: enabled.checked, day: +day.value, hour: +hour.value });
+      toast(enabled.checked ? `weekly report: ${DAY_NAMES[+day.value]} ${hour.value.padStart(2, "0")}:00` : "schedule disabled", "ok", "REPORTS");
+    } catch (e) {
+      toast(String(e.message || e), "err", "REPORTS");
+    }
+  });
+
+  const out = el("div", {});
+  const runBtn = el("button", { class: "btn" }, "◈ RUN REPORT NOW");
+  runBtn.addEventListener("click", async () => {
+    runBtn.disabled = true;
+    out.replaceChildren(el("div", { class: "ai-running" }, el("div", { class: "spinner" }),
+      "Collecting the lab snapshot and asking Claude — this can take a few minutes…"));
+    try {
+      const { report } = await api.reportRun();
+      out.replaceChildren();
+      toast(`report generated — grade ${report.grade}`, "ok", "REPORTS");
+      list.prepend(reportPanel(report, true), el("div", { class: "section-gap" }));
+    } catch (e) {
+      out.replaceChildren(el("div", { class: "setup-result err" }, `✕ ${e.message}`));
+    } finally {
+      runBtn.disabled = false;
+    }
+  });
+
+  const schedPanel = el("div", { class: "panel accent" },
+    el("div", { class: "panel-title" }, "AI HEALTH REPORT — POWERED BY CLAUDE"),
+    el("div", { class: "mono-dim", style: "margin-bottom:10px" },
+      "A weekly snapshot of the whole lab — gateway health, security events, Proxmox, Docker, HA/ZHA, ",
+      "uptime monitors, warnings — digested by Claude into a graded report with ranked findings. ",
+      "The summary is delivered through your notification channels; full reports live here (last 12 kept)."),
+    el("div", { style: "display:flex;gap:14px;align-items:center;flex-wrap:wrap" },
+      el("label", { class: "check", style: "margin:0" }, enabled, "run weekly on"),
+      day, el("span", { class: "mono-dim" }, "at"), hour,
+      saveBtn, el("div", { class: "spacer" }), runBtn),
+    el("div", { class: "section-gap" }),
+    out);
+
+  const list = el("div", {});
+  const past = state.reports || [];
+  if (!past.length) {
+    list.append(el("div", { class: "panel hero-empty" },
+      el("h2", {}, "NO REPORTS YET"),
+      el("p", {}, "Run one now, or enable the weekly schedule above.")));
+  } else {
+    past.forEach((r, i) => list.append(reportPanel(r, i === 0), el("div", { class: "section-gap" })));
+  }
+
+  if (state.running) {
+    out.replaceChildren(el("div", { class: "ai-running" }, el("div", { class: "spinner" }),
+      "a report is being generated right now — refresh in a minute or two"));
+  }
+
+  body.append(schedPanel, el("div", { class: "section-gap" }), list);
+}
+
+function reportPanel(r, expanded) {
+  const when = new Date(r.ts * 1000).toLocaleString([], { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+  const content = el("div", { style: expanded ? "" : "display:none" }, ...reportBody(r));
+  const head = el("div", { class: "panel-title", style: "cursor:pointer" },
+    el("span", { class: `grade-badge grade-${r.grade}`, style: "font-size:12px;padding:2px 8px;margin-right:8px" }, r.grade),
+    `HEALTH REPORT — ${when.toUpperCase()}`,
+    el("span", { class: "pill neutral", style: "margin-left:8px" }, (r.trigger || "manual").toUpperCase()),
+    el("span", { class: "mono-dim", style: "margin-left:auto" }, expanded ? "▾" : "▸"));
+  head.addEventListener("click", () => {
+    const hidden = content.style.display === "none";
+    content.style.display = hidden ? "" : "none";
+    head.lastChild.textContent = hidden ? "▾" : "▸";
+  });
+  return el("div", { class: "panel" }, head, content);
+}
+
+function reportBody(r) {
+  const parts = [];
+  parts.push(el("div", { class: "ai-summary", style: "margin:4px 0 12px" }, r.summary || ""));
+  if (r.highlights?.length) {
+    parts.push(el("div", { style: "display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px" },
+      ...r.highlights.map(h => el("span", { class: "pill ok", style: "white-space:normal;line-height:1.5" }, `✓ ${h}`))));
+  }
+  const order = { critical: 0, serious: 1, warning: 2, info: 3 };
+  const items = [...(r.findings || [])].sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9));
+  if (!items.length) parts.push(el("div", { class: "pill ok" }, "● NO ISSUES FOUND"));
+  for (const f of items) parts.push(findingCard(f));
+  if (r._usage) parts.push(el("div", { class: "mono-dim", style: "margin-top:6px" },
+    `claude-opus-4-8 · ${r._usage.input_tokens ?? "?"} in / ${r._usage.output_tokens ?? "?"} out tokens`));
+  return parts;
 }
 
 // ------------------------------------------------------------ shared

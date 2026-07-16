@@ -23,7 +23,7 @@ import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from app import ai, monitors, notify, oplog, poller, scanner, store
+from app import ai, monitors, notify, oplog, poller, reports, scanner, store
 from app.connectors import CONNECTORS, docker, homeassistant, proxmox, unifi
 from app.httpclient import HttpError
 
@@ -238,6 +238,22 @@ def route_monitor_delete(_m, p, _b):
     return {"ok": True}
 
 
+def route_reports_get(_m, _p, _b):
+    return reports.get_state()
+
+
+def route_reports_run(_m, _p, _b):
+    return {"ok": True, "report": reports.generate("manual")}
+
+
+def route_reports_config(_m, _p, body):
+    cfg = reports.set_config(body or {})
+    oplog.add("info", "reports",
+              f"schedule updated: {'weekly' if cfg['enabled'] else 'disabled'} "
+              f"day={cfg['day']} hour={cfg['hour']:02d}:00")
+    return {"ok": True, "config": cfg}
+
+
 def route_ha_system(_m, _p, _b):
     return homeassistant.system_info(_settings("homeassistant"))
 
@@ -324,6 +340,9 @@ ROUTES = [
     ("GET",    r"^/api/docker/storage$",                                  route_docker_storage),
     ("GET",    r"^/api/storage/roots$",                                   route_scan_roots),
     ("POST",   r"^/api/storage/scan$",                                    route_scan),
+    ("GET",    r"^/api/reports$",                                         route_reports_get),
+    ("POST",   r"^/api/reports/run$",                                     route_reports_run),
+    ("POST",   r"^/api/reports/config$",                                  route_reports_config),
     ("GET",    r"^/api/monitors$",                                        route_monitors_list),
     ("GET",    r"^/api/monitors/history$",                                route_monitors_history),
     ("POST",   r"^/api/monitors$",                                        route_monitor_create),
@@ -435,6 +454,7 @@ def main():
 
     poller.start()
     monitors.start()
+    reports.start()
     oplog.add("info", "claudeos", f"server started on {args.host}:{args.port}")
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"\n  ┌─ CLAUDEOS ── homelab mission control")

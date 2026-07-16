@@ -47,6 +47,10 @@ export const api = {
   scanRoots:       ()            => call("GET",    "/api/storage/roots"),
   scanFolder:      (path)        => call("POST",   "/api/storage/scan", { path }),
 
+  reports:         ()            => call("GET",    "/api/reports"),
+  reportRun:       ()            => call("POST",   "/api/reports/run"),
+  reportConfig:    (c)           => call("POST",   "/api/reports/config", c),
+
   monitors:        ()            => call("GET",    "/api/monitors"),
   monitorsHistory: ()            => call("GET",    "/api/monitors/history"),
   monitorCreate:   (m)           => call("POST",   "/api/monitors", m),

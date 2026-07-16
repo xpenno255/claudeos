@@ -262,6 +262,65 @@ A-F. Findings must be specific to the devices named in the data. Recommendations
 be actionable for a homelab user."""
 
 
+REPORT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "summary": {"type": "string",
+                    "description": "3-4 sentence executive summary of the lab's overall health this week"},
+        "grade": {"type": "string", "enum": ["A", "B", "C", "D", "F"],
+                  "description": "overall health grade"},
+        "highlights": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "at most five positive notes worth knowing (all green, strong uptime, issue resolved) — short one-liners",
+        },
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "severity": {"type": "string", "enum": ["critical", "serious", "warning", "info"]},
+                    "category": {"type": "string",
+                                 "description": "which part of the lab: network, compute, containers, home, security, monitoring, general"},
+                    "title": {"type": "string", "description": "one-line finding"},
+                    "detail": {"type": "string", "description": "what the data shows, with the actual numbers"},
+                    "recommendation": {"type": "string", "description": "concrete next step"},
+                },
+                "required": ["severity", "category", "title", "detail", "recommendation"],
+            },
+        },
+    },
+    "required": ["summary", "grade", "highlights", "findings"],
+}
+
+REPORT_SYSTEM_PROMPT = """You are a senior SRE writing the weekly health report for a homelab you
+administer: a UniFi network (UDM-SE gateway), a Proxmox node running an Ubuntu Docker
+VM (~38 containers), and Home Assistant OS with a large ZHA Zigbee mesh. You receive a
+JSON snapshot: gateway health, port errors, firmware updates, IPS/security event counts,
+client anomalies, Proxmox nodes and datastores, Docker fleet state, HA/ZHA health,
+uptime-monitor stats, the week's warning-level ops log and last-hour metric aggregates.
+
+Rules:
+- Be specific: quote the actual numbers, names and IPs from the data. Never pad.
+- Rank findings by real impact. Full datastores, offline devices, failing monitors and
+  internal security events outrank cosmetic warnings. Routine blocked inbound scans are
+  background noise — mention the count in the summary, only escalate if a pattern stands
+  out (e.g. one internal host repeatedly targeted, or outbound threats).
+- Sections that show {"error": ...} mean that system could not be reached during
+  collection — that is itself a finding.
+- Highlights are for genuinely good news; don't invent any.
+- Grade honestly: A = everything healthy, C = several things need attention,
+  F = something important is broken right now."""
+
+
+def analyze_health(data: dict) -> dict:
+    user = ("Weekly homelab snapshot:\n"
+            f"```json\n{json.dumps(data, indent=1)[:120000]}\n```")
+    return ask_json(REPORT_SYSTEM_PROMPT, user, REPORT_SCHEMA, max_tokens=10000)
+
+
 EVENT_SYSTEM_PROMPT = """You are a network security analyst triaging a single event from a UniFi
 gateway (UDM-SE) protecting a homelab. The owner is technical but not a security
 professional; internet-facing scans and blocked intrusion attempts are constant

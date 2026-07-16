@@ -25,10 +25,14 @@ caveats noted at the bottom.
    IPS blocks are subcategory SECURITY_INTRUSION_PREVENTION); v1
    `stat/anomalies` still works. EVENTS & THREATS panel on Ops → NETWORK
    with per-event "◈ TRIAGE" (Claude judges real risk vs alert severity).
-4. **Scheduled AI health report** — weekly cron feeds Claude the metric
-   history, events, port errors, ZHA health, backup status → ranked digest
-   delivered via ntfy/email. (Netdata ships this as a paid feature —
-   pattern validated, no OSS reference.)
+4. ✅ **Scheduled AI health report** *(shipped 2026-07-16)* —
+   `app/reports.py` collects a compact lab snapshot (gateway, security
+   events, Proxmox nodes/storage, Docker fleet, HA/ZHA, monitors, week's
+   warnings, metric aggregates) → Claude digests to grade + highlights +
+   ranked findings. Weekly scheduler (day/hour, stdlib loop), summary
+   delivered via notification channels, last 12 reports kept in
+   data/reports.json, Ops → REPORTS tab (schedule config + run-now +
+   report history). Email deferred — deliverable via any notify channel.
 5. **SMART disk health** — Scrutiny-style attribute tracking with
    real-failure-rate thresholds. First step: probe Proxmox
    `/api2/json/nodes/{node}/disks/smart` with the existing token to see if
