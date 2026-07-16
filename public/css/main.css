@@ -85,6 +85,8 @@ body {
 }
 
 .wordmark { display: flex; gap: 12px; align-items: center; padding: 0 20px 22px; }
+a.wordmark { text-decoration: none; color: inherit; }
+a.wordmark:hover .wordmark-glyph { text-shadow: 0 0 20px rgba(255,179,71,.9); }
 .wordmark-glyph {
   font-size: 26px; color: var(--amber);
   text-shadow: 0 0 14px rgba(255,179,71,.6);
@@ -126,6 +128,9 @@ body {
   display: flex; align-items: center; gap: 8px;
   font-size: 11px; color: var(--ink-2); padding: 4px 0;
 }
+a.rail-sys { text-decoration: none; }
+a.rail-sys:hover { color: var(--ink); }
+a.rail-sys:hover .sys-name { color: var(--amber); }
 .rail-sys .sys-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .rail-foot { padding: 14px 20px 0; border-top: 1px dashed var(--hairline); }

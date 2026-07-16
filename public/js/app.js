@@ -67,7 +67,7 @@ function renderRail(overview) {
   const rows = SYSTEMS.map(s => {
     const st = overview.systems?.[s.id] || {};
     const cls = st.ok === true ? "ok" : st.ok === false ? "err" : "off";
-    return el("div", { class: "rail-sys" },
+    return el("a", { class: "rail-sys", href: `#/ops/${s.tab}`, title: `open ${s.label} operations` },
       el("span", { class: `led ${cls}` }),
       el("span", { class: "sys-name" }, s.label),
       el("span", { class: "mono-dim" }, st.ok === true ? "UP" : st.ok === false ? "DOWN" : "—"));
