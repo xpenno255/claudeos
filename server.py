@@ -272,6 +272,10 @@ def route_ha_zha(_m, _p, _b):
     return {"devices": homeassistant.zha_devices(_settings("homeassistant"))}
 
 
+def route_ha_updates(_m, _p, _b):
+    return {"updates": homeassistant.updates(_settings("homeassistant"))}
+
+
 def _zigbee_log_lines(settings: dict) -> list:
     log = homeassistant.error_log(settings)
     keywords = ("zha", "zigbee", "zigpy", "bellows", "deconz", "nwk", "ieee")
@@ -363,6 +367,7 @@ ROUTES = [
     ("DELETE", r"^/api/monitors/(?P<mid>[0-9a-f]+)$",                     route_monitor_delete),
     ("GET",    r"^/api/ha/system$",                                       route_ha_system),
     ("GET",    r"^/api/ha/zha$",                                          route_ha_zha),
+    ("GET",    r"^/api/ha/updates$",                                      route_ha_updates),
     ("POST",   r"^/api/ha/analyze-logs$",                                 route_ha_analyze_logs),
     ("POST",   r"^/api/ha/zha-insights$",                                 route_ha_zha_insights),
     ("POST",   r"^/api/proxmox/guests/(?P<node>[\w.-]+)/(?P<type>qemu|lxc)/(?P<vmid>\d+)/(?P<action>\w+)$", route_proxmox_action),

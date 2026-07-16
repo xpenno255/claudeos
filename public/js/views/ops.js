@@ -205,6 +205,7 @@ async function network(body, toast) {
 
 const EVT_FILTERS = [
   { label: "THREATS & SECURITY", cats: ["SECURITY"] },
+  { label: "CLIENT EVENTS", cats: ["CLIENT_DEVICES"] },
   { label: "ALL EVENTS", cats: null },
 ];
 
@@ -218,37 +219,48 @@ function eventsPanel(initial, anomalies, toast) {
 
   let cats = EVT_FILTERS[0].cats;
   let page = 0;
+  let seq = 0;  // request token — a filter switch invalidates in-flight loads
   const tbody = el("tbody", {});
   const countEl = el("span", { class: "mono-dim" }, "");
 
   // ---- filter chips
   const chips = EVT_FILTERS.map((f, i) => {
     const b = el("button", { class: `btn btn-mini ${i === 0 ? "" : "btn-ghost"}` }, f.label);
-    b.addEventListener("click", async () => {
+    b.addEventListener("click", () => {
       chips.forEach(c => c.className = "btn btn-mini btn-ghost");
       b.className = "btn btn-mini";
       cats = f.cats;
       page = 0;
-      tbody.replaceChildren();
-      await load();
+      load(true);
     });
     return b;
   });
 
   const moreBtn = el("button", { class: "btn btn-mini btn-ghost" }, "LOAD OLDER ▾");
-  moreBtn.addEventListener("click", async () => { page += 1; await load(); });
+  moreBtn.addEventListener("click", () => { page += 1; load(false); });
 
-  async function load() {
+  async function load(fresh) {
+    const my = ++seq;
     moreBtn.disabled = true;
+    if (fresh) {
+      tbody.replaceChildren(el("tr", {},
+        el("td", { colspan: "5", class: "mono-dim" }, "… loading events")));
+      countEl.textContent = "";
+    }
     try {
       const r = await api.unifiEvents({ categories: cats, page });
+      if (my !== seq) return;  // a newer filter/page superseded this request
+      if (fresh) tbody.replaceChildren();
       addRows(r.events);
       countEl.textContent = `${r.total ?? "?"} total · page ${page + 1}/${r.pages ?? "?"}`;
       moreBtn.style.display = r.pages && page + 1 >= r.pages ? "none" : "";
     } catch (e) {
+      if (my !== seq) return;
+      if (fresh) tbody.replaceChildren(el("tr", {},
+        el("td", { colspan: "5", class: "mono-dim" }, `⚠ ${e.message}`)));
       toast(String(e.message || e), "err", "EVENTS");
     } finally {
-      moreBtn.disabled = false;
+      if (my === seq) moreBtn.disabled = false;
     }
   }
 
@@ -650,13 +662,16 @@ function barRow(label, size, max, dim = false) {
 // ------------------------------------------------------------ HOME
 
 async function home(body, toast) {
-  const [{ entities }, sys, zha] = await Promise.all([
+  const [{ entities }, sys, zha, updatesRes] = await Promise.all([
     api.haEntities(),
     api.haSystem().catch(e => ({ error: String(e.message || e) })),
     api.haZha().catch(e => ({ error: String(e.message || e) })),
+    api.haUpdates().catch(e => ({ error: String(e.message || e) })),
   ]);
 
   body.append(systemPanel(sys));
+  body.append(el("div", { class: "section-gap" }));
+  body.append(updatesPanel(updatesRes));
   body.append(el("div", { class: "section-gap" }));
   body.append(zhaPanel(zha, toast));
   body.append(el("div", { class: "section-gap" }));
@@ -747,6 +762,44 @@ function systemPanel(sys) {
           el("td", {}, a.update_available ? el("span", { class: "pill warn" }, "UPDATE") : "")))))));
   cols.append(colA, colB);
   panel.append(cols);
+  return panel;
+}
+
+function updatesPanel(res) {
+  const panel = el("div", { class: "panel" });
+  const title = el("div", { class: "panel-title" }, "UPDATES — CORE, OS, ADD-ONS & DEVICES");
+  panel.append(title);
+  if (res.error) {
+    panel.append(el("div", { class: "mono-dim" }, `⚠ ${res.error}`));
+    return panel;
+  }
+  const all = res.updates || [];
+  const avail = all.filter(u => u.available);
+  title.append(
+    el("span", { class: `pill ${avail.length ? "warn" : "ok"}` },
+      avail.length ? `${avail.length} UPDATE${avail.length > 1 ? "S" : ""} AVAILABLE` : "● ALL UP TO DATE"),
+    el("span", { class: "mono-dim", style: "margin-left:auto;letter-spacing:0" },
+      `${all.length} tracked update entities`));
+
+  if (avail.length) {
+    const rows = avail.map(u => el("tr", {},
+      el("td", { class: "strong" },
+        u.name,
+        u.in_progress ? el("span", { class: "pill neutral", style: "margin-left:6px" }, "INSTALLING…") : "",
+        u.skipped ? el("span", { class: "pill neutral", style: "margin-left:6px" }, "SKIPPED") : ""),
+      el("td", { class: "mono-dim" }, u.installed || "?"),
+      el("td", {}, "→ ", el("b", {}, u.latest || "?")),
+      el("td", {}, u.release_url
+        ? el("a", { href: u.release_url, target: "_blank", rel: "noopener", style: "color:var(--amber)" }, "release notes ↗")
+        : el("span", { class: "mono-dim" }, "—"))));
+    panel.append(
+      el("div", { class: "mono-dim", style: "margin-bottom:8px" },
+        "install from Home Assistant (Settings → Updates) — shown here so nothing slips by"),
+      el("div", { class: "table-wrap", style: "max-height:300px;overflow-y:auto" },
+        el("table", {},
+          el("thead", {}, el("tr", {}, ...["COMPONENT", "INSTALLED", "LATEST", ""].map(h => el("th", {}, h)))),
+          el("tbody", {}, ...rows))));
+  }
   return panel;
 }
 

@@ -143,6 +143,13 @@ def collect() -> dict:
 
     if (s := _sys("homeassistant")):
         ha = {"summary": _try(homeassistant.summary, s)}
+        ups = _try(homeassistant.updates, s)
+        if isinstance(ups, list):
+            ha["updates_available"] = [
+                f"{u['name']}: {u['installed']} → {u['latest']}"
+                for u in ups if u.get("available")][:20]
+        else:
+            ha["updates_available"] = ups
         zha = _try(homeassistant.zha_devices, s)
         if isinstance(zha, list):
             ha["zha"] = {

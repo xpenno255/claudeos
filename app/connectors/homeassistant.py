@@ -183,6 +183,30 @@ def zha_devices(settings: dict) -> list:
     return out
 
 
+def updates(settings: dict) -> list:
+    """Available updates from HA's update.* entities — covers core, OS,
+    supervisor, add-ons and integration/device firmware in one list."""
+    data = _call(settings, "GET", "/api/states") or []
+    out = []
+    for s in data:
+        eid = s.get("entity_id", "")
+        if not eid.startswith("update."):
+            continue
+        a = s.get("attributes") or {}
+        out.append({
+            "entity_id": eid,
+            "name": a.get("friendly_name") or a.get("title") or eid,
+            "available": s.get("state") == "on",
+            "installed": a.get("installed_version"),
+            "latest": a.get("latest_version"),
+            "release_url": a.get("release_url"),
+            "skipped": a.get("skipped_version"),
+            "in_progress": bool(a.get("in_progress")),
+        })
+    out.sort(key=lambda u: (not u["available"], u["name"].lower()))
+    return out
+
+
 def call_service(settings: dict, domain: str, service: str, entity_id: str | None = None,
                  data: dict | None = None) -> dict:
     body = dict(data or {})

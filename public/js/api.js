@@ -64,6 +64,7 @@ export const api = {
   haService:       (payload)     => call("POST",   "/api/ha/service", payload),
   haSystem:        ()            => call("GET",    "/api/ha/system"),
   haZha:           ()            => call("GET",    "/api/ha/zha"),
+  haUpdates:       ()            => call("GET",    "/api/ha/updates"),
   haAnalyzeLogs:   ()            => call("POST",   "/api/ha/analyze-logs"),
   haZhaInsights:   ()            => call("POST",   "/api/ha/zha-insights"),
 };
