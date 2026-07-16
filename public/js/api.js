@@ -44,6 +44,13 @@ export const api = {
   scanRoots:       ()            => call("GET",    "/api/storage/roots"),
   scanFolder:      (path)        => call("POST",   "/api/storage/scan", { path }),
 
+  monitors:        ()            => call("GET",    "/api/monitors"),
+  monitorsHistory: ()            => call("GET",    "/api/monitors/history"),
+  monitorCreate:   (m)           => call("POST",   "/api/monitors", m),
+  monitorUpdate:   (id, m)       => call("POST",   `/api/monitors/${id}`, m),
+  monitorDelete:   (id)          => call("DELETE", `/api/monitors/${id}`),
+  monitorsCheck:   ()            => call("POST",   "/api/monitors/check"),
+
   haEntities:      ()            => call("GET",    "/api/ha/entities"),
   haService:       (payload)     => call("POST",   "/api/ha/service", payload),
   haSystem:        ()            => call("GET",    "/api/ha/system"),

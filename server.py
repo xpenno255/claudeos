@@ -23,7 +23,7 @@ import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from app import ai, notify, oplog, poller, scanner, store
+from app import ai, monitors, notify, oplog, poller, scanner, store
 from app.connectors import CONNECTORS, docker, homeassistant, proxmox, unifi
 from app.httpclient import HttpError
 
@@ -181,6 +181,38 @@ def route_scan(_m, _p, body):
     return result
 
 
+def route_monitors_list(_m, _p, _b):
+    return {"monitors": monitors.list_monitors()}
+
+
+def route_monitors_history(_m, _p, _b):
+    return {"history": monitors.history()}
+
+
+def route_monitor_create(_m, _p, body):
+    mon = monitors.create(body or {})
+    oplog.add("info", "monitor", f"monitor added: {mon['name']} ({mon['type']} {mon['target']})")
+    threading.Thread(target=monitors.check_all, daemon=True).start()
+    return {"ok": True, "monitor": mon}
+
+
+def route_monitors_check(_m, _p, _b):
+    monitors.check_all()
+    return {"ok": True, "monitors": monitors.list_monitors()}
+
+
+def route_monitor_update(_m, p, body):
+    mon = monitors.update(p["mid"], body or {})
+    oplog.add("info", "monitor", f"monitor updated: {mon['name']}")
+    return {"ok": True, "monitor": mon}
+
+
+def route_monitor_delete(_m, p, _b):
+    monitors.delete(p["mid"])
+    oplog.add("info", "monitor", f"monitor removed: {p['mid']}")
+    return {"ok": True}
+
+
 def route_ha_system(_m, _p, _b):
     return homeassistant.system_info(_settings("homeassistant"))
 
@@ -264,6 +296,12 @@ ROUTES = [
     ("GET",    r"^/api/docker/storage$",                                  route_docker_storage),
     ("GET",    r"^/api/storage/roots$",                                   route_scan_roots),
     ("POST",   r"^/api/storage/scan$",                                    route_scan),
+    ("GET",    r"^/api/monitors$",                                        route_monitors_list),
+    ("GET",    r"^/api/monitors/history$",                                route_monitors_history),
+    ("POST",   r"^/api/monitors$",                                        route_monitor_create),
+    ("POST",   r"^/api/monitors/check$",                                  route_monitors_check),
+    ("POST",   r"^/api/monitors/(?P<mid>[0-9a-f]+)$",                     route_monitor_update),
+    ("DELETE", r"^/api/monitors/(?P<mid>[0-9a-f]+)$",                     route_monitor_delete),
     ("GET",    r"^/api/ha/system$",                                       route_ha_system),
     ("GET",    r"^/api/ha/zha$",                                          route_ha_zha),
     ("POST",   r"^/api/ha/analyze-logs$",                                 route_ha_analyze_logs),
@@ -368,6 +406,7 @@ def main():
     args = ap.parse_args()
 
     poller.start()
+    monitors.start()
     oplog.add("info", "claudeos", f"server started on {args.host}:{args.port}")
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"\n  ┌─ CLAUDEOS ── homelab mission control")

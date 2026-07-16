@@ -3,7 +3,7 @@
 
 import { api } from "../api.js";
 import { el, fmtBytes, fmtPct, fmtUptime, debounce } from "../util.js";
-import { meter, sparkRow } from "../charts.js";
+import { meter, sparkRow, sparkline } from "../charts.js";
 import { SYSTEMS, BY_ID } from "../meta.js";
 
 const TABS = [
@@ -11,6 +11,7 @@ const TABS = [
   { tab: "compute",    label: "COMPUTE",    sys: "proxmox" },
   { tab: "containers", label: "CONTAINERS", sys: "docker" },
   { tab: "home",       label: "HOME",       sys: "homeassistant" },
+  { tab: "uptime",     label: "UPTIME",     sys: null },  // service monitors — not tied to one system
 ];
 
 export async function renderOps(root, args, { toast }) {
@@ -29,8 +30,9 @@ export async function renderOps(root, args, { toast }) {
   const body = el("div", {});
   root.append(body);
 
-  const cfg = overview.config?.[TABS.find(t => t.tab === active).sys];
-  if (!cfg?.configured) {
+  const activeSys = TABS.find(t => t.tab === active).sys;
+  const cfg = activeSys ? overview.config?.[activeSys] : null;
+  if (activeSys && !cfg?.configured) {
     body.append(el("div", { class: "panel hero-empty" },
       el("h2", {}, "SYSTEM NOT LINKED"),
       el("p", {}, "Add the connection details on the Setup page first."),
@@ -38,7 +40,7 @@ export async function renderOps(root, args, { toast }) {
     return;
   }
 
-  const renderers = { network, compute, containers, home };
+  const renderers = { network, compute, containers, home, uptime };
   await renderers[active](body, toast, overview);
 }
 
@@ -648,6 +650,152 @@ function zhaPanel(zha, toast) {
             el("th", { class: h.startsWith(">") ? "num" : "" }, h.replace(/^>/, ""))))),
         el("tbody", {}, ...rows))));
   return panel;
+}
+
+// ------------------------------------------------------------ UPTIME
+
+const MONITOR_TYPES = [
+  { value: "http",    label: "HTTP(S)",       placeholder: "https://192.168.1.30:9000",  hint: "up when the response status is < 400" },
+  { value: "keyword", label: "HTTP + KEYWORD", placeholder: "http://192.168.1.20:8123",  hint: "up when the page loads AND contains the keyword" },
+  { value: "tcp",     label: "TCP PORT",      placeholder: "192.168.1.10:22",            hint: "up when the port accepts a connection" },
+  { value: "dns",     label: "DNS",           placeholder: "unifi.local",                hint: "up when the hostname resolves" },
+];
+
+async function uptime(body, toast) {
+  const [{ monitors }, { history }] = await Promise.all([
+    api.monitors(), api.monitorsHistory().catch(() => ({ history: {} })),
+  ]);
+
+  const up = monitors.filter(m => m.ok === true).length;
+  const down = monitors.filter(m => m.ok === false).length;
+  const paused = monitors.filter(m => m.enabled === false).length;
+
+  // ---- add-monitor form (collapsed until needed)
+  const form = monitorForm(toast);
+  const addBtn = el("button", { class: "btn" }, "+ ADD MONITOR");
+  addBtn.addEventListener("click", () => {
+    form.style.display = form.style.display === "none" ? "" : "none";
+  });
+  form.style.display = monitors.length ? "none" : "";
+
+  const checkBtn = el("button", { class: "btn btn-ghost" }, "▸ CHECK ALL NOW");
+  checkBtn.addEventListener("click", async () => {
+    checkBtn.disabled = true;
+    checkBtn.textContent = "… CHECKING";
+    try {
+      await api.monitorsCheck();
+      location.reload();
+    } catch (e) {
+      toast(String(e.message || e), "err", "CHECK FAILED");
+      checkBtn.disabled = false;
+      checkBtn.textContent = "▸ CHECK ALL NOW";
+    }
+  });
+
+  const rows = monitors.map(m => monitorRow(m, history[m.id] || [], toast));
+
+  body.append(
+    el("div", { class: "ops-toolbar" },
+      el("span", { class: `pill ${down ? "err" : up ? "ok" : "neutral"}` },
+        down ? `✕ ${down} DOWN` : up ? `● ALL ${up} UP` : "NO MONITORS"),
+      paused ? el("span", { class: "pill neutral" }, `${paused} PAUSED`) : null,
+      el("span", { class: "mono-dim" }, "checked every 30 s · alerts after 2 consecutive failures"),
+      el("div", { class: "spacer" }),
+      monitors.length ? checkBtn : null, addBtn),
+    form,
+    monitors.length
+      ? el("div", { class: "panel" },
+          el("div", { class: "panel-title" }, `SERVICE MONITORS — ${monitors.length}`),
+          tableWrap(["", "NAME", "TYPE", "TARGET", "RESPONSE — LAST HOUR", ">NOW", ">24H UPTIME", "FOR", ""], rows))
+      : el("div", { class: "panel hero-empty" },
+          el("h2", {}, "NO MONITORS YET"),
+          el("p", {}, "Watch any HTTP endpoint, TCP port or hostname — container UIs, Proxmox, the UDM, HA. ",
+            "Down/recover alerts go to the notification channels configured on the Setup page.")));
+}
+
+function monitorRow(m, points, toast) {
+  const pill =
+    m.enabled === false ? el("span", { class: "pill neutral" }, "PAUSED")
+    : m.ok === true ? el("span", { class: "pill ok" }, "● UP")
+    : m.ok === false ? el("span", { class: "pill err", title: m.error || "" }, "✕ DOWN")
+    : el("span", { class: "pill neutral" }, "PENDING");
+
+  // response-time sparkline over the last hour (successful checks only)
+  const hourAgo = Date.now() / 1000 - 3600;
+  const spark = sparkline(
+    points.filter(p => p[0] > hourAgo && p[1] && p[2] != null).map(p => [p[0], p[2]]),
+    { color: m.ok === false ? "var(--critical)" : "#30b48a", width: 150, height: 26 });
+  spark.style.width = "150px";
+  spark.style.height = "26px";
+
+  const uptimeColor = m.uptime_pct == null ? ""
+    : m.uptime_pct < 95 ? "color:var(--critical);font-weight:600"
+    : m.uptime_pct < 99.5 ? "color:var(--warning)" : "color:var(--good)";
+
+  const pauseBtn = actionBtn(m.enabled === false ? "RESUME" : "PAUSE",
+    () => api.monitorUpdate(m.id, { enabled: m.enabled === false }),
+    { confirm: false, toast });
+
+  return el("tr", { "data-k": `${m.name} ${m.type} ${m.target}`.toLowerCase() },
+    el("td", {}, pill),
+    el("td", { class: "strong", title: m.error || "" }, m.name),
+    el("td", {}, el("span", { class: "pill neutral" }, m.type.toUpperCase())),
+    el("td", { class: "mono-dim" }, m.target),
+    el("td", {}, spark),
+    el("td", { class: "num" }, m.ms != null ? `${m.ms.toFixed(0)} ms` : m.error ? "—" : "…"),
+    el("td", { class: "num", style: uptimeColor }, m.uptime_pct != null ? `${m.uptime_pct}%` : "—"),
+    el("td", { class: "num" }, m.since && m.ok != null ? fmtUptime(Date.now() / 1000 - m.since) : "—"),
+    el("td", {}, el("div", { class: "actions" },
+      pauseBtn,
+      actionBtn("REMOVE", () => api.monitorDelete(m.id), { danger: true, toast }))));
+}
+
+function monitorForm(toast) {
+  const name = el("input", { type: "text", placeholder: "Jellyfin" });
+  const target = el("input", { type: "text", placeholder: MONITOR_TYPES[0].placeholder });
+  const keyword = el("input", { type: "text", placeholder: "healthy" });
+  const tls = el("input", { type: "checkbox" });
+  const hint = el("div", { class: "hint" }, MONITOR_TYPES[0].hint);
+
+  const type = el("select", { class: "search", style: "min-width:170px" },
+    ...MONITOR_TYPES.map(t => el("option", { value: t.value }, t.label)));
+  const keywordField = el("div", { class: "field", style: "display:none" },
+    el("label", {}, "KEYWORD"), keyword);
+  const tlsField = el("label", { class: "check" }, tls, "verify TLS certificate (off for self-signed)");
+  type.addEventListener("change", () => {
+    const t = MONITOR_TYPES.find(x => x.value === type.value);
+    target.placeholder = t.placeholder;
+    hint.textContent = t.hint;
+    keywordField.style.display = type.value === "keyword" ? "" : "none";
+    tlsField.style.display = ["http", "keyword"].includes(type.value) ? "" : "none";
+  });
+
+  const result = el("div", { class: "setup-result" });
+  const saveBtn = el("button", { class: "btn" }, "▸ START MONITORING");
+  saveBtn.addEventListener("click", async () => {
+    try {
+      await api.monitorCreate({
+        name: name.value.trim(), type: type.value, target: target.value.trim(),
+        keyword: keyword.value.trim(), verify_tls: tls.checked,
+      });
+      toast(`monitoring ${name.value.trim()}`, "ok", "MONITOR ADDED");
+      setTimeout(() => location.reload(), 700);
+    } catch (e) {
+      result.className = "setup-result err";
+      result.textContent = `✕ ${e.message}`;
+    }
+  });
+
+  return el("div", { class: "panel accent", style: "margin-bottom:14px" },
+    el("div", { class: "panel-title" }, "ADD MONITOR"),
+    el("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:0 18px" },
+      el("div", { class: "field" }, el("label", {}, "NAME"), name),
+      el("div", { class: "field" }, el("label", {}, "CHECK TYPE"), type),
+      el("div", { class: "field" }, el("label", {}, "TARGET"), target, hint),
+      keywordField),
+    tlsField,
+    el("div", { class: "setup-actions" }, saveBtn),
+    result);
 }
 
 // ------------------------------------------------------------ shared

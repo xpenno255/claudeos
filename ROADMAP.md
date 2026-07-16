@@ -12,11 +12,11 @@ caveats noted at the bottom.
    Configured on Setup page, secrets encrypted as usual; per-channel
    enable/pause + SAVE + TEST sends a real test notification. Poller fires
    down (True→False) / recover alerts; identical titles muted for 5 min.
-2. **Uptime/service monitors** — per-service HTTP(S)/TCP/DNS/keyword checks
-   with status history, response-time sparkline, alert on down/recover.
-   Pattern: Uptime Kuma (~89k stars). Chassis: existing 30s poller +
-   metric-history ring buffers. Monitor the ~38 containers' UIs, HA,
-   Proxmox, UDM.
+2. ✅ **Uptime/service monitors** *(shipped 2026-07-16)* — HTTP(S)/TCP/DNS/
+   keyword checks (`app/monitors.py`), concurrent 30s sweeps, ~24h ring-
+   buffer history, Ops → UPTIME tab (add/pause/remove, response sparklines,
+   24h uptime %). Alerts via the notification layer after 2 consecutive
+   failures, recover alert on first success.
 3. **UniFi events & IDS feed + Claude triage** — site events
    (`/stat/event`), alarms (`/list/alarm`), IDS/IPS events
    (`/stat/ips/event`), anomalies (`/stat/anomalies`) via the existing
