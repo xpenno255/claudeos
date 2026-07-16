@@ -27,9 +27,28 @@ SECRET_FIELDS = {
     "docker": [],
     "homeassistant": ["token"],
     "ai": ["api_key"],  # Anthropic API key for analysis features
+    # notification channels (app/notify.py) — stored like any other system
+    "ntfy": ["topic"],  # the topic name is the only secret ntfy has
+    "webhook": [],
+    "telegram": ["bot_token"],
+    "pushover": ["token", "user_key"],
+    "hanotify": [],
 }
 
 SYSTEM_IDS = list(SECRET_FIELDS.keys())
+
+SYSTEM_LABELS = {
+    "unifi": "UniFi Network",
+    "proxmox": "Proxmox VE",
+    "docker": "Docker",
+    "homeassistant": "Home Assistant",
+    "ai": "Claude AI",
+    "ntfy": "ntfy",
+    "webhook": "Webhook",
+    "telegram": "Telegram",
+    "pushover": "Pushover",
+    "hanotify": "HA Notify",
+}
 
 _lock = threading.Lock()
 

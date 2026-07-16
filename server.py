@@ -23,20 +23,14 @@ import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from app import ai, oplog, poller, scanner, store
+from app import ai, notify, oplog, poller, scanner, store
 from app.connectors import CONNECTORS, docker, homeassistant, proxmox, unifi
 from app.httpclient import HttpError
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, "public")
 
-SYSTEM_LABELS = {
-    "unifi": "UniFi Network",
-    "proxmox": "Proxmox VE",
-    "docker": "Docker",
-    "homeassistant": "Home Assistant",
-    "ai": "Claude AI",
-}
+SYSTEM_LABELS = store.SYSTEM_LABELS
 
 
 def _settings(system_id: str) -> dict:
@@ -94,6 +88,8 @@ def route_system_test(_m, p, _b):
         if not s or not s.get("api_key"):
             raise LookupError("AI is not configured — add your Anthropic API key first")
         result = ai.test(s)
+    elif sid in notify.CHANNEL_IDS:
+        result = notify.test_channel(sid)
     elif sid in CONNECTORS:
         result = CONNECTORS[sid].test(_settings(sid))
     else:

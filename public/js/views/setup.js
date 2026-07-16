@@ -64,6 +64,63 @@ const FORMS = [
   },
 ];
 
+// Notification channels — fan-out targets for alerts (system down/recover,
+// and every alerting feature built on top). All plain HTTP POST server-side.
+const NOTIFY_FORMS = [
+  {
+    id: "ntfy",
+    title: "NTFY — PUSH NOTIFICATIONS",
+    note: "The quickest channel: no account needed. Pick a long random topic name (it's effectively the password), subscribe to it in the ntfy app (Android/iOS/desktop), done. Leave the server blank for ntfy.sh or point at a self-hosted instance.",
+    fields: [
+      { key: "host", label: "SERVER — OPTIONAL", placeholder: "https://ntfy.sh", optional: true },
+      { key: "topic", label: "TOPIC", secret: true,
+        hint: "long + random, e.g. claudeos-alerts-x7Q9tK2m — anyone who knows it can read your alerts" },
+    ],
+    tls: true,
+    enabledToggle: true,
+  },
+  {
+    id: "telegram",
+    title: "TELEGRAM BOT",
+    note: "Create a bot with @BotFather (/newbot) to get the token. Send your bot one message, then read your chat id from api.telegram.org/bot<TOKEN>/getUpdates (or ask @userinfobot).",
+    fields: [
+      { key: "bot_token", label: "BOT TOKEN", secret: true, hint: "123456789:AA… from @BotFather" },
+      { key: "chat_id", label: "CHAT ID", placeholder: "123456789" },
+    ],
+    enabledToggle: true,
+  },
+  {
+    id: "pushover",
+    title: "PUSHOVER",
+    note: "pushover.net — your user key is on the dashboard; create an Application/API token for ClaudeOS. One-time purchase per device platform after the 30-day trial.",
+    fields: [
+      { key: "token", label: "API TOKEN", secret: true },
+      { key: "user_key", label: "USER KEY", secret: true },
+    ],
+    enabledToggle: true,
+  },
+  {
+    id: "hanotify",
+    title: "HOME ASSISTANT NOTIFY",
+    note: "Route alerts through any HA notify service — e.g. the companion app on your phone. Uses the Home Assistant connection configured above. Find service names under Developer tools → Actions (notify.*).",
+    fields: [
+      { key: "service", label: "NOTIFY SERVICE", placeholder: "notify.mobile_app_pixel",
+        hint: "with or without the notify. prefix" },
+    ],
+    enabledToggle: true,
+  },
+  {
+    id: "webhook",
+    title: "GENERIC WEBHOOK",
+    note: "ClaudeOS POSTs JSON {source, title, message, priority, tags, ts} to this URL for every alert — point it at n8n, Node-RED, or anything that speaks webhooks.",
+    fields: [
+      { key: "host", label: "WEBHOOK URL", placeholder: "https://n8n.lan/webhook/claudeos" },
+    ],
+    tls: true,
+    enabledToggle: true,
+  },
+];
+
 export async function renderSetup(root, _args, { toast }) {
   const [config, overview] = await Promise.all([api.systems(), api.overview().catch(() => ({}))]);
 
@@ -78,6 +135,17 @@ export async function renderSetup(root, _args, { toast }) {
   const grid = el("div", { class: "setup-grid" });
   for (const form of FORMS) grid.append(card(form, config[form.id], overview.systems?.[form.id], toast));
   root.append(grid);
+
+  root.append(el("div", { class: "panel accent", style: "margin:16px 0" },
+    el("div", { class: "panel-title" }, "NOTIFICATION CHANNELS"),
+    el("div", { class: "mono-dim", style: "font-size:12px" },
+      "Alerts — a linked system going down or recovering, plus everything the upcoming monitors add — ",
+      "fan out to every enabled channel below. SAVE + TEST sends a real test notification. ",
+      "Repeated identical alerts are muted for 5 minutes so a flapping box can't flood your phone.")));
+
+  const ngrid = el("div", { class: "setup-grid" });
+  for (const form of NOTIFY_FORMS) ngrid.append(card(form, config[form.id], undefined, toast));
+  root.append(ngrid);
 }
 
 function card(form, cfg, status, toast) {
@@ -109,8 +177,19 @@ function card(form, cfg, status, toast) {
     tlsCheck.checked = settings.verify_tls === true;
   }
 
+  let enabledCheck = null;
+  if (form.enabledToggle) {
+    enabledCheck = el("input", { type: "checkbox" });
+    enabledCheck.checked = settings.enabled !== false;
+  }
+
   const statusPill = () => {
     if (!configured) return el("span", { class: "pill neutral" }, "NOT LINKED");
+    if (form.enabledToggle) {
+      return settings.enabled !== false
+        ? el("span", { class: "pill ok" }, "● ENABLED")
+        : el("span", { class: "pill neutral" }, "PAUSED");
+    }
     if (status?.ok === true) return el("span", { class: "pill ok" }, "● ONLINE");
     if (status?.ok === false) return el("span", { class: "pill err" }, "✕ UNREACHABLE");
     return el("span", { class: "pill neutral" }, "LINKED");
@@ -123,7 +202,8 @@ function card(form, cfg, status, toast) {
       if (v || !f.secret) payload[f.key] = v;
     }
     if (form.tls) payload.verify_tls = tlsCheck.checked;
-    const needsHost = form.fields.some(f => f.key === "host");
+    if (form.enabledToggle) payload.enabled = enabledCheck.checked;
+    const needsHost = form.fields.some(f => f.key === "host" && !f.optional);
     if (needsHost && !payload.host) {
       result.className = "setup-result err";
       result.textContent = "✕ host is required";
@@ -179,6 +259,9 @@ function card(form, cfg, status, toast) {
     ...fieldsEls,
     form.tls
       ? el("label", { class: "check" }, tlsCheck, "verify TLS certificate (off for self-signed)")
+      : null,
+    form.enabledToggle
+      ? el("label", { class: "check" }, enabledCheck, "channel enabled (uncheck to pause without losing settings)")
       : null,
     el("div", { class: "setup-actions" },
       el("button", { class: "btn", onclick: () => save(true) }, "SAVE + TEST"),

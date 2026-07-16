@@ -6,11 +6,12 @@ caveats noted at the bottom.
 
 ## Agreed build order (top 5)
 
-1. **Notification layer** — fan-out dispatcher with 3–5 native channels, all
-   plain HTTP POST (stdlib-friendly): **ntfy first** (verified: POST to topic
-   URL, no SDK/account; topic name = secret), then generic webhook, Telegram
-   bot API, Pushover, HA notify passthrough. Configured on Setup page,
-   secrets encrypted as usual. *Prerequisite for items 2–5.*
+1. ✅ **Notification layer** *(shipped 2026-07-16)* — fan-out dispatcher
+   (`app/notify.py`) with five channels: ntfy (JSON publish, topic = secret),
+   generic webhook, Telegram bot API, Pushover, HA notify passthrough.
+   Configured on Setup page, secrets encrypted as usual; per-channel
+   enable/pause + SAVE + TEST sends a real test notification. Poller fires
+   down (True→False) / recover alerts; identical titles muted for 5 min.
 2. **Uptime/service monitors** — per-service HTTP(S)/TCP/DNS/keyword checks
    with status history, response-time sparkline, alert on down/recover.
    Pattern: Uptime Kuma (~89k stars). Chassis: existing 30s poller +

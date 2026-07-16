@@ -9,7 +9,7 @@ import threading
 import time
 from collections import deque
 
-from . import oplog, store
+from . import notify, oplog, store
 from .connectors import CONNECTORS
 
 POLL_INTERVAL = 30
@@ -75,6 +75,7 @@ def poll_once() -> None:
                 _latest[system_id] = {"ok": None, "ts": time.time(), "error": "not configured"}
             continue
         was_ok = _latest.get(system_id, {}).get("ok")
+        label = store.SYSTEM_LABELS.get(system_id, system_id)
         try:
             s = mod.summary(settings)
             with _lock:
@@ -82,11 +83,18 @@ def poll_once() -> None:
                 _record(system_id, _metrics_from_summary(system_id, s))
             if was_ok is False:
                 oplog.add("info", system_id, "connection recovered")
+                notify.send(f"{label} recovered", "polling succeeded again",
+                            priority="default", tags=["white_check_mark"])
         except Exception as e:  # noqa: BLE001 — any connector failure = offline
             with _lock:
                 _latest[system_id] = {"ok": False, "ts": time.time(), "error": str(e)}
             if was_ok is not False:
                 oplog.add("warn", system_id, f"poll failed: {e}")
+            # only a True→False transition alerts, so a restart of ClaudeOS
+            # itself never re-fires "down" for systems already offline
+            if was_ok is True:
+                notify.send(f"{label} is DOWN", str(e),
+                            priority="high", tags=["rotating_light"])
 
 
 def snapshot() -> dict:
