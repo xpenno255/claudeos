@@ -42,6 +42,10 @@ export const api = {
   proxmoxDisksRefresh: ()        => call("POST",   "/api/proxmox/disks/refresh"),
   proxmoxAction:   (node, type, vmid, action) =>
     call("POST", `/api/proxmox/guests/${node}/${type}/${vmid}/${action}`),
+  proxmoxGuestDetail: (node, type, vmid) =>
+    call("GET", `/api/proxmox/guests/${node}/${type}/${vmid}/detail`),
+  proxmoxGuestRrd: (node, type, vmid) =>
+    call("GET", `/api/proxmox/guests/${node}/${type}/${vmid}/rrd`),
 
   dockerContainers:()            => call("GET",    "/api/docker/containers"),
   dockerAction:    (id, action)  => call("POST",   `/api/docker/containers/${id}/${action}`),

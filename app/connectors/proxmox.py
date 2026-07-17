@@ -203,3 +203,55 @@ def disk_smart(settings: dict, node: str, devpath: str) -> dict:
     import urllib.parse
     q = urllib.parse.quote(devpath, safe="")
     return _call(settings, "GET", f"/nodes/{node}/disks/smart?disk={q}").get("data", {})
+
+
+def guest_detail(settings: dict, node: str, gtype: str, vmid: str) -> dict:
+    """Extended live stats for one guest (status/current), including the
+    balloon inside-guest memory view and PSI pressure counters (verified
+    on this PVE 2026-07-17: pressure* are percent-of-time-stalled)."""
+    st = _call(settings, "GET", f"/nodes/{node}/{gtype}/{vmid}/status/current").get("data", {})
+    out = {k: st.get(k) for k in (
+        "name", "status", "qmpstatus", "uptime", "cpus", "cpu",
+        "mem", "maxmem", "memhost", "freemem", "disk", "maxdisk",
+        "diskread", "diskwrite", "netin", "netout", "swap", "maxswap", "agent")}
+    out["pressure"] = {k[len("pressure"):]: st.get(k)
+                       for k in st if k.startswith("pressure")}
+    bi = st.get("ballooninfo") or {}
+    if bi:
+        out["balloon"] = {"total": bi.get("total_mem"), "free": bi.get("free_mem"),
+                          "actual": bi.get("actual"), "max": bi.get("max_mem"),
+                          "swapped_out": bi.get("mem_swapped_out")}
+    return out
+
+
+def guest_rrd(settings: dict, node: str, gtype: str, vmid: str,
+              timeframe: str = "hour") -> dict:
+    """Per-guest RRD series for the detail graphs."""
+    if timeframe not in ("hour", "day", "week"):
+        raise ValueError("timeframe must be hour, day or week")
+    data = _call(settings, "GET",
+                 f"/nodes/{node}/{gtype}/{vmid}/rrddata?timeframe={timeframe}&cf=AVERAGE"
+                 ).get("data", [])
+    series = {"cpu_pct": [], "mem_pct": [], "mem_pressure_pct": [], "io_pressure_pct": [],
+              "disk_read_bps": [], "disk_write_bps": [], "net_in_bps": [], "net_out_bps": []}
+    for p in data:
+        t = p.get("time")
+        if t is None:
+            continue
+        if p.get("cpu") is not None:
+            series["cpu_pct"].append([t, round(p["cpu"] * 100, 2)])
+        if p.get("mem") is not None and p.get("maxmem"):
+            series["mem_pct"].append([t, round(100 * p["mem"] / p["maxmem"], 1)])
+        if p.get("pressurememorysome") is not None:
+            series["mem_pressure_pct"].append([t, round(p["pressurememorysome"], 2)])
+        if p.get("pressureiosome") is not None:
+            series["io_pressure_pct"].append([t, round(p["pressureiosome"], 2)])
+        if p.get("diskread") is not None:
+            series["disk_read_bps"].append([t, p["diskread"]])
+        if p.get("diskwrite") is not None:
+            series["disk_write_bps"].append([t, p["diskwrite"]])
+        if p.get("netin") is not None:
+            series["net_in_bps"].append([t, p["netin"]])
+        if p.get("netout") is not None:
+            series["net_out_bps"].append([t, p["netout"]])
+    return series

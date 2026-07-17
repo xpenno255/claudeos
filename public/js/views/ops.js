@@ -383,14 +383,16 @@ async function compute(body, toast) {
 
   const guestRows = guests.map(g => {
     const running = g.status === "running";
-    return el("tr", { "data-k": `${g.name} ${g.vmid} ${g.type} ${g.node}`.toLowerCase() },
+    const memPct = running && g.maxmem ? 100 * g.mem / g.maxmem : null;
+    const row = el("tr", { "data-k": `${g.name} ${g.vmid} ${g.type} ${g.node}`.toLowerCase(), style: "cursor:pointer", title: "click for extended stats & graphs" },
       el("td", { class: "num" }, g.vmid),
       el("td", { class: "strong" }, g.name || "—"),
       el("td", {}, el("span", { class: "pill neutral" }, g.type === "qemu" ? "VM" : "LXC")),
       el("td", {}, g.node),
       el("td", {}, statePill(g.status)),
       el("td", { class: "num" }, running && g.cpu != null ? `${(g.cpu * 100).toFixed(1)}%` : "—"),
-      el("td", { class: "num" }, running ? fmtBytes(g.mem) : "—"),
+      el("td", { class: "num", title: running ? `${fmtBytes(g.mem)} of ${fmtBytes(g.maxmem)} allocated` : "" },
+        memPct != null ? `${memPct.toFixed(0)}%` : "—"),
       el("td", { class: "num" }, running ? fmtUptime(g.uptime) : "—"),
       el("td", {}, el("div", { class: "actions" },
         running
@@ -398,6 +400,8 @@ async function compute(body, toast) {
              actionBtn("SHUTDOWN", () => api.proxmoxAction(g.node, g.type, g.vmid, "shutdown"), { danger: true, toast }),
              actionBtn("STOP", () => api.proxmoxAction(g.node, g.type, g.vmid, "stop"), { danger: true, toast })]
           : [actionBtn("START", () => api.proxmoxAction(g.node, g.type, g.vmid, "start"), { confirm: false, toast })])));
+    row.addEventListener("click", () => toggleGuestDetail(row, g));
+    return row;
   });
 
   // ---- datastores
@@ -447,6 +451,101 @@ async function compute(body, toast) {
     el("div", { class: "panel" },
       el("div", { class: "panel-title" }, `VIRTUAL MACHINES & CONTAINERS — ${guests.length}`),
       tableWrap([">VMID", "NAME", "TYPE", "NODE", "STATE", ">CPU", ">MEM", ">UPTIME", ""], guestRows)));
+}
+
+// ---------------------------------------------- COMPUTE: guest detail row
+
+function toggleGuestDetail(row, g) {
+  if (row._detail) { row._detail.remove(); row._detail = null; return; }
+  const td = el("td", { colspan: "9" },
+    el("div", { class: "ai-running" }, el("div", { class: "spinner" }), "loading guest stats…"));
+  const tr = el("tr", {}, td);
+  row.after(tr);
+  row._detail = tr;
+  Promise.all([
+    api.proxmoxGuestDetail(g.node, g.type, g.vmid),
+    api.proxmoxGuestRrd(g.node, g.type, g.vmid),
+  ]).then(([d, { rrd }]) => {
+    if (row._detail === tr) td.replaceChildren(guestDetailView(g, d, rrd));
+  }).catch(e => {
+    if (row._detail === tr) td.replaceChildren(el("div", { class: "setup-result err" }, `✕ ${e.message}`));
+  });
+}
+
+// The honest "does it need more RAM?" answer. Kernel PSI is ground truth:
+// stalls mean real pressure; high occupancy alone is usually page cache.
+function ramVerdict(d) {
+  const some = d.pressure?.memorysome;
+  const bal = d.balloon;
+  const free = bal?.free ?? d.freemem;
+  const total = bal?.total || d.maxmem;
+  const freePct = free != null && total ? 100 * free / total : null;
+  const cacheNote = freePct != null && freePct < 15
+    ? ` Only ${fmtBytes(free)} is literally free inside the guest, but the rest of the "used" figure is mostly Linux page cache — reclaimed instantly when applications need it.`
+    : freePct != null ? ` ${fmtBytes(free)} (${freePct.toFixed(0)}%) is free inside the guest.` : "";
+  if (some != null) {
+    if (some >= 5) return { cls: "err", head: "MEMORY PRESSURE — MORE RAM WOULD HELP",
+      text: `Processes in this guest are stalled waiting for memory ${some.toFixed(1)}% of the time (kernel PSI). That is real pressure, not cache — allocate more RAM or move workloads off.` };
+    if (some >= 0.5) return { cls: "warn", head: "MILD MEMORY PRESSURE",
+      text: `Kernel PSI shows ${some.toFixed(2)}% of time stalled on memory — occasional pressure. Watch the pressure graph; sustained growth means it needs more RAM.${cacheNote}` };
+    return { cls: "ok", head: "NO REAL MEMORY PRESSURE — RAM IS SUFFICIENT",
+      text: `Kernel PSI shows ${some.toFixed(2)}% of time stalled on memory — effectively none. This guest does not need more RAM.${cacheNote}` };
+  }
+  if (bal?.free != null) {
+    return freePct >= 20
+      ? { cls: "ok", head: "LOOKS COMFORTABLE", text: `No PSI data, but ${freePct.toFixed(0)}% of guest memory is literally free.` }
+      : { cls: "warn", head: "INCONCLUSIVE", text: `Free memory inside the guest is low (${fmtBytes(free)}), but that may just be page cache. Check inside with: free -m (look at "available").` };
+  }
+  return { cls: "warn", head: "LIMITED VISIBILITY",
+    text: "No balloon/agent stats — the host-side figure includes guest disk cache, so it usually overstates real usage. Enable the QEMU guest agent + balloon device for the inside view." };
+}
+
+function guestDetailView(g, d, rrd) {
+  const bal = d.balloon;
+  const hostMem = d.memhost ?? d.mem;
+  const insideUsed = bal?.total && bal.free != null ? bal.total - bal.free : null;
+  const v = ramVerdict(d);
+
+  const pills = el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px" },
+    el("span", { class: "pill neutral" }, `${d.cpus ?? "?"} vCPU`),
+    el("span", { class: "pill neutral" }, `up ${fmtUptime(d.uptime)}`),
+    g.type === "qemu" ? el("span", { class: `pill ${d.agent ? "ok" : "neutral"}` },
+      d.agent ? "GUEST AGENT ✓" : "NO GUEST AGENT") : null,
+    bal?.swapped_out ? el("span", { class: "pill warn" }, `swapped out ${fmtBytes(bal.swapped_out)}`) : null);
+
+  const memCol = el("div", {},
+    meter("RAM — GUEST VIEW", d.maxmem ? 100 * d.mem / d.maxmem : null,
+      { detail: `${fmtBytes(d.mem)} / ${fmtBytes(d.maxmem)}` }),
+    hostMem !== d.mem ? meter("RAM — HOST VIEW (INCL. CACHE)", d.maxmem ? 100 * hostMem / d.maxmem : null,
+      { detail: fmtBytes(hostMem) }) : null,
+    insideUsed != null ? meter("INSIDE GUEST — NON-FREE", 100 * insideUsed / bal.total,
+      { detail: `${fmtBytes(bal.free)} free` }) : null,
+    g.type === "lxc" && d.maxswap ? meter("SWAP", 100 * (d.swap || 0) / d.maxswap,
+      { detail: `${fmtBytes(d.swap)} / ${fmtBytes(d.maxswap)}` }) : null,
+    g.type === "lxc" && d.maxdisk ? meter("ROOTFS", 100 * (d.disk || 0) / d.maxdisk,
+      { detail: `${fmtBytes(d.disk)} / ${fmtBytes(d.maxdisk)}` }) : null,
+    el("div", { style: "margin-top:10px" },
+      el("span", { class: `pill ${v.cls}` }, v.head),
+      el("div", { class: "mono-dim", style: "margin-top:6px;line-height:1.6" }, v.text)));
+
+  const loadCol = el("div", {},
+    sparkRow("CPU", rrd.cpu_pct, { color: BY_ID.proxmox.hex, format: x => `${x.toFixed(1)}%` }),
+    sparkRow("RAM", rrd.mem_pct, { color: "#9085e9", format: x => `${x.toFixed(1)}%` }),
+    sparkRow("MEM PRESSURE (PSI)", rrd.mem_pressure_pct, { color: "#e66767", format: x => `${x.toFixed(2)}%` }),
+    sparkRow("IO PRESSURE (PSI)", rrd.io_pressure_pct, { color: "#c98500", format: x => `${x.toFixed(2)}%` }));
+
+  const ioCol = el("div", {},
+    sparkRow("DISK READ", rrd.disk_read_bps, { color: "#3987e5", format: x => fmtBytes(x, true) }),
+    sparkRow("DISK WRITE", rrd.disk_write_bps, { color: "#56c8d8", format: x => fmtBytes(x, true) }),
+    sparkRow("NET IN", rrd.net_in_bps, { color: "#30b48a", format: x => fmtBytes(x, true) }),
+    sparkRow("NET OUT", rrd.net_out_bps, { color: "#ffb347", format: x => fmtBytes(x, true) }));
+
+  return el("div", { style: "padding:8px 4px 12px" },
+    pills,
+    el("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:0 26px" },
+      memCol,
+      el("div", {}, el("div", { class: "mono-dim", style: "margin:6px 0" }, "LAST HOUR"), loadCol),
+      el("div", {}, el("div", { class: "mono-dim", style: "margin:6px 0" }, "I/O — LAST HOUR"), ioCol)));
 }
 
 // -------------------------------------------------- COMPUTE: disk health

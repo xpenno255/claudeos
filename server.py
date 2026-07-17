@@ -188,6 +188,14 @@ def route_proxmox_perf(_m, _p, _b):
     return {"perf": proxmox.perf(_settings("proxmox"))}
 
 
+def route_proxmox_guest_detail(_m, p, _b):
+    return proxmox.guest_detail(_settings("proxmox"), p["node"], p["type"], p["vmid"])
+
+
+def route_proxmox_guest_rrd(_m, p, _b):
+    return {"rrd": proxmox.guest_rrd(_settings("proxmox"), p["node"], p["type"], p["vmid"])}
+
+
 def route_proxmox_disks(_m, _p, _b):
     return smart.get()
 
@@ -385,6 +393,8 @@ ROUTES = [
     ("GET",    r"^/api/ha/updates$",                                      route_ha_updates),
     ("POST",   r"^/api/ha/analyze-logs$",                                 route_ha_analyze_logs),
     ("POST",   r"^/api/ha/zha-insights$",                                 route_ha_zha_insights),
+    ("GET",    r"^/api/proxmox/guests/(?P<node>[\w.-]+)/(?P<type>qemu|lxc)/(?P<vmid>\d+)/detail$", route_proxmox_guest_detail),
+    ("GET",    r"^/api/proxmox/guests/(?P<node>[\w.-]+)/(?P<type>qemu|lxc)/(?P<vmid>\d+)/rrd$", route_proxmox_guest_rrd),
     ("POST",   r"^/api/proxmox/guests/(?P<node>[\w.-]+)/(?P<type>qemu|lxc)/(?P<vmid>\d+)/(?P<action>\w+)$", route_proxmox_action),
     ("GET",    r"^/api/docker/containers$",                               route_docker_containers),
     ("POST",   r"^/api/docker/containers/(?P<cid>[0-9a-fA-F]+)/(?P<action>\w+)$", route_docker_action),
