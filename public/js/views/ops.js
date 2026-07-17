@@ -609,10 +609,13 @@ function diskPanel(res, toast) {
 // ------------------------------------------------------------ CONTAINERS
 
 async function containers(body, toast, overview) {
-  const [{ containers }, scanRootsRes, updatesRes] = await Promise.all([
+  const [{ containers }, scanRootsRes, updatesRes, gpuRes] = await Promise.all([
     api.dockerContainers(), api.scanRoots().catch(() => ({ roots: [] })),
     api.dockerUpdates().catch(e => ({ images: [], error: String(e.message || e) })),
+    api.dockerGpu().catch(e => ({ containers: [], processes: [],
+      attribution: { available: false, hint: String(e.message || e) } })),
   ]);
+  const gpuByName = Object.fromEntries((gpuRes.containers || []).map(g => [g.name, g]));
 
   // image ref → update status ("update" | "current" | "local" | "error")
   const normRef = r => r && !r.includes("@sha256:") && !r.split("/").pop().includes(":") ? `${r}:latest` : r;
@@ -622,16 +625,29 @@ async function containers(body, toast, overview) {
   const h = overview?.systems?.docker?.data?.host;
   let hostPanel = null;
   if (h) {
+    // GPU meters expand into the per-container attribution view on click
+    let gpuSection = [];
+    if ((h.gpus || []).length) {
+      const gpuDetail = el("div", { style: "display:none" });
+      const meters = h.gpus.flatMap(g => [
+        meter(`GPU ${g.name || ""} ▾`.trim(), g.util_pct,
+          { detail: g.temp != null ? `${g.temp}°C` : "" }),
+        meter("GPU VRAM", g.mem_pct, {}),
+      ]);
+      const clickable = el("div", { style: "cursor:pointer", title: "click for per-container GPU usage" }, ...meters);
+      clickable.addEventListener("click", () => {
+        const hidden = gpuDetail.style.display === "none";
+        gpuDetail.style.display = hidden ? "" : "none";
+        if (hidden && !gpuDetail.childElementCount) gpuDetail.append(gpuDetailView(gpuRes));
+      });
+      gpuSection = [clickable, gpuDetail];
+    }
     // single full-width stack: CPU, RAM, GPU, VRAM, then disks
     hostPanel = el("div", { class: "panel" },
       el("div", { class: "panel-title" }, "DOCKER HOST VITALS — VIA GLANCES"),
       meter("CPU", h.cpu_pct, {}),
       meter("RAM", h.mem_pct, { detail: h.mem_total ? `${fmtBytes(h.mem_used)} / ${fmtBytes(h.mem_total)}` : "" }),
-      ...(h.gpus || []).flatMap(g => [
-        meter(`GPU ${g.name || ""}`.trim(), g.util_pct,
-          { detail: g.temp != null ? `${g.temp}°C` : "" }),
-        meter("GPU VRAM", g.mem_pct, {}),
-      ]),
+      ...gpuSection,
       ...(h.disks || []).map(d =>
         meter(`DISK ${d.mount}`, d.pct, { detail: `${fmtBytes(d.used)} / ${fmtBytes(d.total)}` })));
   } else if (overview?.systems?.docker?.data?.host_error) {
@@ -644,8 +660,13 @@ async function containers(body, toast, overview) {
   const makeRow = c => {
     const running = c.state === "running";
     const upd = updByRef[normRef(c.image)];
+    const gp = gpuByName[c.name];
     return el("tr", { "data-k": `${c.name} ${c.image} ${c.compose_project || ""}`.toLowerCase() },
-      el("td", { class: "strong" }, c.name),
+      el("td", { class: "strong" }, c.name,
+        gp ? el("span", {
+          class: `pill ${gp.using ? "ok" : "neutral"}`, style: "margin-left:6px",
+          title: gp.using ? `${gp.procs} process(es) on the GPU right now` : "GPU passthrough enabled",
+        }, gp.using ? `⚡ ${gp.sm_pct != null ? gp.sm_pct.toFixed(0) + "%" : "ACTIVE"}` : "⚡ GPU") : ""),
       el("td", {}, c.compose_project || "—"),
       el("td", { class: "mono-dim" }, c.image,
         upd?.status === "update" ? el("span", { class: "pill warn", style: "margin-left:6px" }, "⬆ UPDATE") : "",
@@ -794,6 +815,39 @@ async function containers(body, toast, overview) {
         updatesRes.ts ? el("span", { class: "mono-dim", style: "margin-left:auto;letter-spacing:0" },
           `registry check ${new Date(updatesRes.ts * 1000).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}`) : null),
       fleetBody));
+}
+
+function gpuDetailView(res) {
+  const wrap = el("div", { style: "margin:4px 0 10px" });
+  const list = res.containers || [];
+  if (!list.length) {
+    wrap.append(el("div", { class: "mono-dim" }, "no containers have GPU passthrough enabled"));
+    return wrap;
+  }
+  const rows = list.map(g => el("tr", {},
+    el("td", { class: "strong" }, g.name),
+    el("td", {}, statePill(g.state)),
+    el("td", {}, g.using
+      ? el("span", { class: "pill ok" }, "● ON GPU NOW")
+      : el("span", { class: "pill neutral" }, g.state === "running" ? "IDLE" : "—")),
+    el("td", { class: "num" }, g.sm_pct != null ? `${g.sm_pct.toFixed(0)}%` : "—"),
+    el("td", { class: "num" }, g.vram_mb != null ? fmtBytes(g.vram_mb * 1048576) : "—"),
+    el("td", { class: "num" }, g.procs || "—")));
+  wrap.append(
+    el("div", { class: "mono-dim", style: "margin-bottom:6px" },
+      `GPU PASSTHROUGH — ${list.length} container${list.length === 1 ? "" : "s"}`),
+    tableWrap(["CONTAINER", "STATE", "GPU", ">SM %", ">VRAM", ">PROCS"], rows));
+  const stray = (res.processes || []).filter(p => !p.container);
+  if (stray.length) {
+    wrap.append(el("div", { class: "mono-dim", style: "margin-top:6px" },
+      "on the GPU but outside these containers: ",
+      stray.map(p => `${p.command || `pid ${p.pid}`}${p.sm_pct != null ? ` (${p.sm_pct}%)` : ""}`).join(", ")));
+  }
+  if (!res.attribution?.available && res.attribution?.hint) {
+    wrap.append(el("div", { class: "setup-result err", style: "margin-top:6px" },
+      `⚠ live usage unavailable — ${res.attribution.hint}`));
+  }
+  return wrap;
 }
 
 function storageReport(r) {

@@ -235,3 +235,144 @@ def container_action(settings: dict, container_id: str, action: str) -> dict:
         raise ValueError(f"unsupported action: {action}")
     _call(settings, "POST", f"/containers/{container_id}/{action}")
     return {"ok": True, "detail": f"{action} sent to {container_id}"}
+
+
+# ------------------------------------------------------------ GPU report
+
+def exec_run(settings: dict, cid: str, cmd: list, timeout: int = 20) -> str:
+    """Run a command in a container and return its output. Needs EXEC=1 on
+    a socket-proxy (exec *create* passes under /containers/, but
+    /exec/{id}/start is gated separately — probed 2026-07-17)."""
+    import json as _json
+    import urllib.request
+    ex = httpclient.request("POST", _base(settings) + f"/containers/{cid}/exec",
+                            json_body={"AttachStdout": True, "AttachStderr": True, "Cmd": cmd})
+    req = urllib.request.Request(
+        _base(settings) + f"/exec/{ex['Id']}/start",
+        data=_json.dumps({"Detach": False, "Tty": False}).encode(),
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as e:
+        raise httpclient.HttpError(e.code, f"HTTP {e.code} from exec start",
+                                   e.read().decode("utf-8", "replace"), headers=e.headers) from e
+    # demux the docker raw stream: 8-byte frame headers (type, pad, len)
+    out, i = [], 0
+    while i + 8 <= len(raw):
+        size = int.from_bytes(raw[i + 4:i + 8], "big")
+        out.append(raw[i + 8:i + 8 + size])
+        i += 8 + size
+    return b"".join(out).decode("utf-8", errors="replace")
+
+
+def _has_gpu(insp: dict) -> bool:
+    hc = insp.get("HostConfig") or {}
+    if hc.get("Runtime") == "nvidia":
+        return True
+    for d in hc.get("DeviceRequests") or []:
+        if d.get("Driver") == "nvidia" or "gpu" in str(d.get("Capabilities") or "").lower():
+            return True
+    env = (insp.get("Config") or {}).get("Env") or []
+    return any(e.startswith("NVIDIA_VISIBLE_DEVICES=")
+               and e.split("=", 1)[1] not in ("", "void", "none") for e in env)
+
+
+def _parse_pmon(text: str) -> list:
+    """`nvidia-smi pmon -c 1` → [{pid, sm_pct, fb_mb, command}] (columns
+    read from the header line so -s variants all parse)."""
+    cols, procs = None, []
+    for line in text.splitlines():
+        if line.startswith("#") and " pid " in line:
+            cols = line.lstrip("# ").split()
+            continue
+        if line.startswith("#") or not line.strip() or cols is None:
+            continue
+        vals = dict(zip(cols, line.split()))
+        if not str(vals.get("pid", "")).isdigit():
+            continue
+        def num(key):
+            v = vals.get(key, "-")
+            return float(v) if v not in ("-", "") else None
+        procs.append({"pid": int(vals["pid"]), "sm_pct": num("sm"),
+                      "fb_mb": num("fb"),  # -s m adds fb (MB); pmon "mem" is bandwidth-%
+                      "command": vals.get("command")})
+    return procs
+
+
+def gpu_report(settings: dict) -> dict:
+    """Which containers have GPU access, and (when exec is allowed) which
+    are actively using it, attributed via nvidia-smi pmon + docker top."""
+    from concurrent.futures import ThreadPoolExecutor
+    conts = _call(settings, "GET", "/containers/json?all=true")
+
+    def inspect(c):
+        return c, _call(settings, "GET", f"/containers/{c['Id']}/json")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        pairs = list(pool.map(inspect, conts))
+
+    gpu_conts = [{"cid": c["Id"], "name": c["Names"][0].lstrip("/"),
+                  "state": c.get("State"), "using": False,
+                  "sm_pct": None, "vram_mb": None, "procs": 0}
+                 for c, insp in pairs if _has_gpu(insp)]
+
+    report = {"containers": gpu_conts,
+              "attribution": {"available": False, "hint": None},
+              "processes": []}
+
+    running = [g for g in gpu_conts if g["state"] == "running"]
+    exec_host = next((g for g in running if g["name"] == "glances"), None) \
+        or (running[0] if running else None)
+    if not exec_host:
+        report["attribution"]["hint"] = "no running GPU container to query nvidia-smi through"
+        return _strip_cids(report)
+
+    try:
+        txt = exec_run(settings, exec_host["cid"],
+                       ["nvidia-smi", "pmon", "-c", "1", "-s", "um"])
+        procs = _parse_pmon(txt)
+        if not procs and "pmon" in txt.lower() and "not supported" in txt.lower():
+            raise ValueError("pmon unsupported on this GPU/driver")
+    except httpclient.HttpError as e:
+        report["attribution"]["hint"] = (
+            "per-container usage needs EXEC=1 on the docker-socket-proxy "
+            "(add EXEC=1 to its environment and recreate it)"
+            if e.status == 403 else f"nvidia-smi exec failed: {e}")
+        return _strip_cids(report)
+    except Exception as e:  # noqa: BLE001
+        report["attribution"]["hint"] = f"nvidia-smi query failed: {str(e)[:120]}"
+        return _strip_cids(report)
+
+    # map host PIDs → owning container via docker top
+    def top_pids(g):
+        try:
+            t = _call(settings, "GET", f"/containers/{g['cid']}/top")
+            idx = (t.get("Titles") or []).index("PID")
+            return g, {int(p[idx]) for p in t.get("Processes") or []}
+        except Exception:  # noqa: BLE001
+            return g, set()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        owner_pids = list(pool.map(top_pids, running))
+
+    for p in procs:
+        owner = next((g["name"] for g, pids in owner_pids if p["pid"] in pids), None)
+        report["processes"].append({**p, "container": owner})
+        target = next((g for g in gpu_conts if g["name"] == owner), None)
+        if target:
+            target["using"] = True
+            target["procs"] += 1
+            if p["sm_pct"] is not None:
+                target["sm_pct"] = (target["sm_pct"] or 0) + p["sm_pct"]
+            if p["fb_mb"] is not None:
+                target["vram_mb"] = (target["vram_mb"] or 0) + p["fb_mb"]
+
+    report["attribution"]["available"] = True
+    return _strip_cids(report)
+
+
+def _strip_cids(report: dict) -> dict:
+    for g in report["containers"]:
+        g.pop("cid", None)
+    return report

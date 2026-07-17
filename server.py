@@ -206,6 +206,10 @@ def route_proxmox_disks_refresh(_m, _p, _b):
     return smart.get()
 
 
+def route_docker_gpu(_m, _p, _b):
+    return docker.gpu_report(_settings("docker"))
+
+
 def route_docker_updates(_m, _p, _b):
     return registry.get()
 
@@ -375,6 +379,7 @@ ROUTES = [
     ("GET",    r"^/api/proxmox/disks$",                                   route_proxmox_disks),
     ("POST",   r"^/api/proxmox/disks/refresh$",                           route_proxmox_disks_refresh),
     ("GET",    r"^/api/docker/storage$",                                  route_docker_storage),
+    ("GET",    r"^/api/docker/gpu$",                                      route_docker_gpu),
     ("GET",    r"^/api/docker/updates$",                                  route_docker_updates),
     ("POST",   r"^/api/docker/updates/refresh$",                          route_docker_updates_refresh),
     ("GET",    r"^/api/storage/roots$",                                   route_scan_roots),

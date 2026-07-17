@@ -50,6 +50,7 @@ export const api = {
   dockerContainers:()            => call("GET",    "/api/docker/containers"),
   dockerAction:    (id, action)  => call("POST",   `/api/docker/containers/${id}/${action}`),
   dockerStorage:   ()            => call("GET",    "/api/docker/storage"),
+  dockerGpu:       ()            => call("GET",    "/api/docker/gpu"),
   dockerUpdates:   ()            => call("GET",    "/api/docker/updates"),
   dockerUpdatesRefresh: ()       => call("POST",   "/api/docker/updates/refresh"),
   scanRoots:       ()            => call("GET",    "/api/storage/roots"),
