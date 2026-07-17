@@ -128,6 +128,10 @@ a.wordmark:hover .wordmark-glyph { text-shadow: 0 0 20px rgba(255,179,71,.9); }
   display: flex; align-items: center; gap: 8px;
   font-size: 11px; color: var(--ink-2); padding: 4px 0;
 }
+tr.stack-head { cursor: pointer; }
+tr.stack-head td { background: rgba(126,178,209,0.05); border-top: 1px solid var(--hairline); }
+tr.stack-head:hover td { background: rgba(126,178,209,0.10); }
+
 a.rail-sys { text-decoration: none; }
 a.rail-sys:hover { color: var(--ink); }
 a.rail-sys:hover .sys-name { color: var(--amber); }

@@ -542,7 +542,7 @@ async function containers(body, toast, overview) {
         `⚠ ${overview.systems.docker.data.host_error}`));
   }
 
-  const rows = containers.map(c => {
+  const makeRow = c => {
     const running = c.state === "running";
     const upd = updByRef[normRef(c.image)];
     return el("tr", { "data-k": `${c.name} ${c.image} ${c.compose_project || ""}`.toLowerCase() },
@@ -559,7 +559,66 @@ async function containers(body, toast, overview) {
           ? [actionBtn("RESTART", () => api.dockerAction(c.id, "restart"), { danger: true, toast }),
              actionBtn("STOP", () => api.dockerAction(c.id, "stop"), { danger: true, toast })]
           : [actionBtn("START", () => api.dockerAction(c.id, "start"), { confirm: false, toast })])));
+  };
+
+  // ---- container view vs stack view (grouped by compose project)
+  const FLEET_HEADERS = ["NAME", "PROJECT", "IMAGE", "STATE", "STATUS", "PORTS", ""];
+  let viewMode = localStorage.getItem("claudeos-fleet-view") || "containers";
+  const fleetBody = el("div", {});
+
+  function stackView() {
+    const groups = new Map();
+    for (const c of containers) {
+      const key = c.compose_project || "";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(c);
+    }
+    // named stacks alphabetical, loose containers last
+    const keys = [...groups.keys()].sort((a, b) =>
+      a === "" ? 1 : b === "" ? -1 : a.localeCompare(b));
+    const trs = [];
+    for (const key of keys) {
+      const cs = groups.get(key);
+      const runningN = cs.filter(c => c.state === "running").length;
+      const updN = cs.filter(c => updByRef[normRef(c.image)]?.status === "update").length;
+      const chev = el("span", { class: "mono-dim", style: "width:12px" }, "▸");
+      const children = cs.map(c => { const r = makeRow(c); r.style.display = "none"; return r; });
+      const head = el("tr", { class: "stack-head" },
+        el("td", { colspan: "7" },
+          el("div", { style: "display:flex;align-items:center;gap:10px" },
+            chev,
+            el("b", { style: "letter-spacing:.08em" }, key || "STANDALONE CONTAINERS"),
+            el("span", { class: "mono-dim" }, `${cs.length} container${cs.length === 1 ? "" : "s"}`),
+            el("span", { class: `pill ${runningN === cs.length ? "ok" : runningN ? "warn" : "neutral"}` },
+              `${runningN}/${cs.length} RUNNING`),
+            updN ? el("span", { class: "pill warn" }, `⬆ ${updN} UPDATE${updN > 1 ? "S" : ""}`) : "")));
+      head.addEventListener("click", () => {
+        const open = chev.textContent === "▾";
+        chev.textContent = open ? "▸" : "▾";
+        children.forEach(r => { r.style.display = open ? "none" : ""; });
+      });
+      trs.push(head, ...children);
+    }
+    return tableWrap(FLEET_HEADERS, trs);
+  }
+
+  const viewChips = [["containers", "CONTAINERS"], ["stacks", "STACKS"]].map(([mode, label]) => {
+    const b = el("button", { class: "btn btn-mini btn-ghost" }, label);
+    b.addEventListener("click", () => {
+      viewMode = mode;
+      localStorage.setItem("claudeos-fleet-view", mode);
+      renderView();
+    });
+    return { mode, b };
   });
+
+  function renderView() {
+    for (const c of viewChips) c.b.className = `btn btn-mini ${c.mode === viewMode ? "" : "btn-ghost"}`;
+    fleetBody.replaceChildren(viewMode === "stacks"
+      ? stackView()
+      : tableWrap(FLEET_HEADERS, containers.map(makeRow)));
+  }
+  renderView();
 
   // ---- storage analysis (on demand — docker system df can take a moment)
   const storageOut = el("div", {});
@@ -624,14 +683,18 @@ async function containers(body, toast, overview) {
 
   const running = containers.filter(c => c.state === "running").length;
   body.append(
-    toolbar("filter containers…", q => filterRows(body, q), [...scanBtns, analyseBtn, checkBtn]),
+    // clearing the filter re-renders the view so collapsed stacks reset cleanly;
+    // typing reveals matching rows even inside collapsed stacks
+    toolbar("filter containers…", q => q ? filterRows(body, q) : renderView(),
+      [...scanBtns, analyseBtn, checkBtn]),
     ...(hostPanel ? [hostPanel, el("div", { class: "section-gap" })] : []),
     storageOut,
     el("div", { class: "panel" },
-      el("div", { class: "panel-title" }, `DOCKER FLEET — ${running}/${containers.length} RUNNING`, updatePill,
+      el("div", { class: "panel-title" }, `DOCKER FLEET — ${running}/${containers.length} RUNNING`,
+        ...viewChips.map(c => c.b), updatePill,
         updatesRes.ts ? el("span", { class: "mono-dim", style: "margin-left:auto;letter-spacing:0" },
           `registry check ${new Date(updatesRes.ts * 1000).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}`) : null),
-      tableWrap(["NAME", "PROJECT", "IMAGE", "STATE", "STATUS", "PORTS", ""], rows)));
+      fleetBody));
 }
 
 function storageReport(r) {
