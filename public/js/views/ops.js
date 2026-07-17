@@ -662,16 +662,16 @@ async function containers(body, toast, overview) {
     const upd = updByRef[normRef(c.image)];
     const gp = gpuByName[c.name];
     return el("tr", { "data-k": `${c.name} ${c.image} ${c.compose_project || ""}`.toLowerCase() },
-      el("td", { class: "strong" }, c.name,
-        gp ? el("span", {
-          class: `pill ${gp.using ? "ok" : "neutral"}`, style: "margin-left:6px",
-          title: gp.using ? `${gp.procs} process(es) on the GPU right now` : "GPU passthrough enabled",
-        }, gp.using ? `⚡ ${gp.sm_pct != null ? gp.sm_pct.toFixed(0) + "%" : "ACTIVE"}` : "⚡ GPU") : ""),
+      el("td", { class: "strong" }, c.name),
       el("td", {}, c.compose_project || "—"),
       el("td", { class: "mono-dim" }, c.image,
         upd?.status === "update" ? el("span", { class: "pill warn", style: "margin-left:6px" }, "⬆ UPDATE") : "",
         upd?.status === "error" ? el("span", { class: "pill neutral", style: "margin-left:6px", title: upd.error || "" }, "?") : ""),
       el("td", {}, statePill(c.state)),
+      el("td", {}, gp ? el("span", {
+        class: `pill ${gp.using ? "ok" : "neutral"}`,
+        title: gp.using ? `${gp.procs} process(es) on the GPU right now` : "GPU passthrough enabled",
+      }, gp.using ? `⚡ ${gp.sm_pct != null ? gp.sm_pct.toFixed(0) + "%" : "ACTIVE"}` : "⚡ GPU") : el("span", { class: "mono-dim" }, "—")),
       el("td", {}, c.status || "—"),
       el("td", {}, (c.ports || []).join(", ") || "—"),
       el("td", {}, el("div", { class: "actions" },
@@ -682,7 +682,7 @@ async function containers(body, toast, overview) {
   };
 
   // ---- container view vs stack view (grouped by compose project)
-  const FLEET_HEADERS = ["NAME", "PROJECT", "IMAGE", "STATE", "STATUS", "PORTS", ""];
+  const FLEET_HEADERS = ["NAME", "PROJECT", "IMAGE", "STATE", "GPU", "STATUS", "PORTS", ""];
   let viewMode = localStorage.getItem("claudeos-fleet-view") || "containers";
   const fleetBody = el("div", {});
 
@@ -704,7 +704,7 @@ async function containers(body, toast, overview) {
       const chev = el("span", { class: "mono-dim", style: "width:12px" }, "▸");
       const children = cs.map(c => { const r = makeRow(c); r.style.display = "none"; return r; });
       const head = el("tr", { class: "stack-head" },
-        el("td", { colspan: "7" },
+        el("td", { colspan: "8" },
           el("div", { style: "display:flex;align-items:center;gap:10px" },
             chev,
             el("b", { style: "letter-spacing:.08em" }, key || "STANDALONE CONTAINERS"),
