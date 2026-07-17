@@ -14,10 +14,11 @@ DEFAULT_TIMEOUT = 6
 
 
 class HttpError(Exception):
-    def __init__(self, status: int, message: str, body: str = ""):
+    def __init__(self, status: int, message: str, body: str = "", headers=None):
         super().__init__(message)
         self.status = status
         self.body = body
+        self.headers = headers  # e.g. WWW-Authenticate for registry token flows
 
 
 def _ctx(verify_tls: bool) -> ssl.SSLContext:
@@ -60,7 +61,7 @@ def request(
             return parsed
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        raise HttpError(e.code, f"HTTP {e.code} from {url}", body) from e
+        raise HttpError(e.code, f"HTTP {e.code} from {url}", body, headers=e.headers) from e
     except urllib.error.URLError as e:
         raise ConnectionError(f"cannot reach {url}: {e.reason}") from e
     except TimeoutError as e:

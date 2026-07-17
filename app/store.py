@@ -27,6 +27,8 @@ SECRET_FIELDS = {
     "docker": [],
     "homeassistant": ["token"],
     "ai": ["api_key"],  # Anthropic API key for analysis features
+    # container registry credentials (app/registry.py update checks)
+    "registries": ["dockerhub_token", "ghcr_token"],
     # notification channels (app/notify.py) — stored like any other system
     "ntfy": ["topic"],  # the topic name is the only secret ntfy has
     "webhook": [],
@@ -43,6 +45,7 @@ SYSTEM_LABELS = {
     "docker": "Docker",
     "homeassistant": "Home Assistant",
     "ai": "Claude AI",
+    "registries": "Container Registries",
     "ntfy": "ntfy",
     "webhook": "Webhook",
     "telegram": "Telegram",

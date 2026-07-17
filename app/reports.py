@@ -18,7 +18,7 @@ import secrets
 import threading
 import time
 
-from . import ai, monitors, notify, oplog, poller, smart, store
+from . import ai, monitors, notify, oplog, poller, registry, smart, store
 from .connectors import docker, homeassistant, proxmox, unifi
 from .store import DATA_DIR
 
@@ -139,7 +139,11 @@ def collect() -> dict:
         conts = _try(docker.containers, s)
         not_running = ([c.get("name") for c in conts if c.get("state") != "running"]
                        if isinstance(conts, list) else conts)
-        data["systems"]["docker"] = {"summary": summ, "not_running": not_running}
+        ups = _try(registry.get)
+        image_updates = ([i["ref"] for i in ups.get("images", []) if i.get("status") == "update"]
+                         if isinstance(ups, dict) else ups)
+        data["systems"]["docker"] = {"summary": summ, "not_running": not_running,
+                                     "image_updates_available": image_updates}
 
     if (s := _sys("homeassistant")):
         ha = {"summary": _try(homeassistant.summary, s)}

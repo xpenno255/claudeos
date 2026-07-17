@@ -53,6 +53,17 @@ const FORMS = [
     tls: true,
   },
   {
+    id: "registries",
+    title: "CONTAINER REGISTRIES — UPDATE CHECKS",
+    note: "Optional credentials for the container image update checker (Containers tab). Anonymous checks work, but Docker Hub rate-limits by IP — a free PAT (hub.docker.com → Account Settings → Personal access tokens, read-only) lifts that; for GHCR use a GitHub PAT with read:packages. lscr.io needs no key.",
+    fields: [
+      { key: "dockerhub_user", label: "DOCKER HUB USERNAME", placeholder: "xpenno255" },
+      { key: "dockerhub_token", label: "DOCKER HUB ACCESS TOKEN", secret: true },
+      { key: "ghcr_user", label: "GITHUB USERNAME", placeholder: "xpenno255" },
+      { key: "ghcr_token", label: "GITHUB PAT — READ:PACKAGES", secret: true },
+    ],
+  },
+  {
     id: "ai",
     title: "CLAUDE AI — ANALYSIS ENGINE",
     note: "Powers the AI log analysis and ZHA mesh insights on the Home page. Create an API key at console.anthropic.com → API Keys. Analyses run on claude-opus-4-8; logs are sent to the Anthropic API when you click an analyse button, never automatically.",

@@ -46,10 +46,14 @@ caveats noted at the bottom.
 - **WAN speed-test tracker** — trigger/poll gateway speed test via
   `cmd/devmgr` (`speedtest`, `speedtest-status`) — same endpoint pattern as
   restart/upgrade. History chart + below-plan alert. Quick win.
-- **Docker image update detection** — What's Up Docker/watchtower pattern
-  (watchtower discontinued → hot demand): compare running digests vs
-  registry digests, show UPDATE pills like UniFi firmware. ⚠ unverified
-  claims, general knowledge only.
+- ✅ **Docker image update detection** *(shipped 2026-07-17)* —
+  `app/registry.py`: local digests from `/system/df` (works behind a
+  socket-proxy with SYSTEM:1 — `/images/json` needs IMAGES and is
+  avoided), registry digests via manifest HEAD + generic WWW-Authenticate
+  token flow (docker.io/ghcr/lscr verified live). Optional Docker Hub /
+  GHCR PATs on Setup → Container Registries (rate limits, private repos).
+  6-hourly sweeps, UPDATE pills on the Containers tab, notify on new
+  updates, feeds the weekly AI report.
 - **Proxmox backup monitoring** — vzdump task success/failure feed +
   `/cluster/backup-info/not-backed-up` (VMs with no backup job).
 - **HA push updates** — persistent WebSocket `subscribe_events`

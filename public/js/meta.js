@@ -12,6 +12,8 @@ export const BY_ID = {
   ...Object.fromEntries(SYSTEMS.map(s => [s.id, s])),
   // not a polled system — configured on Setup, used by analysis features
   ai: { id: "ai", label: "CLAUDE AI", tab: null, color: "var(--amber)", hex: "#ffb347" },
+  // container registry creds — configured on Setup, used by the update checker
+  registries: { id: "registries", label: "REGISTRIES", tab: null, color: "#c98500", hex: "#c98500" },
   // notification channels — configured on Setup, used by the alert dispatcher
   ntfy:     { id: "ntfy",     label: "NTFY",      tab: null, color: "#30b48a", hex: "#30b48a" },
   webhook:  { id: "webhook",  label: "WEBHOOK",   tab: null, color: "#8a97a8", hex: "#8a97a8" },

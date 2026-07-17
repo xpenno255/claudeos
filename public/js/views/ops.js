@@ -510,9 +510,15 @@ function diskPanel(res, toast) {
 // ------------------------------------------------------------ CONTAINERS
 
 async function containers(body, toast, overview) {
-  const [{ containers }, scanRootsRes] = await Promise.all([
+  const [{ containers }, scanRootsRes, updatesRes] = await Promise.all([
     api.dockerContainers(), api.scanRoots().catch(() => ({ roots: [] })),
+    api.dockerUpdates().catch(e => ({ images: [], error: String(e.message || e) })),
   ]);
+
+  // image ref → update status ("update" | "current" | "local" | "error")
+  const normRef = r => r && !r.includes("@sha256:") && !r.split("/").pop().includes(":") ? `${r}:latest` : r;
+  const updByRef = Object.fromEntries((updatesRes.images || []).map(i => [i.ref, i]));
+  const updates = (updatesRes.images || []).filter(i => i.status === "update");
 
   const h = overview?.systems?.docker?.data?.host;
   let hostPanel = null;
@@ -538,10 +544,13 @@ async function containers(body, toast, overview) {
 
   const rows = containers.map(c => {
     const running = c.state === "running";
+    const upd = updByRef[normRef(c.image)];
     return el("tr", { "data-k": `${c.name} ${c.image} ${c.compose_project || ""}`.toLowerCase() },
       el("td", { class: "strong" }, c.name),
       el("td", {}, c.compose_project || "—"),
-      el("td", { class: "mono-dim" }, c.image),
+      el("td", { class: "mono-dim" }, c.image,
+        upd?.status === "update" ? el("span", { class: "pill warn", style: "margin-left:6px" }, "⬆ UPDATE") : "",
+        upd?.status === "error" ? el("span", { class: "pill neutral", style: "margin-left:6px", title: upd.error || "" }, "?") : ""),
       el("td", {}, statePill(c.state)),
       el("td", {}, c.status || "—"),
       el("td", {}, (c.ports || []).join(", ") || "—"),
@@ -589,13 +598,39 @@ async function containers(body, toast, overview) {
     return btn;
   });
 
+  // ---- image update summary + on-demand re-check
+  const checkBtn = el("button", { class: "btn" }, "⬆ CHECK UPDATES");
+  checkBtn.addEventListener("click", async () => {
+    checkBtn.disabled = true;
+    checkBtn.textContent = "… CHECKING REGISTRIES";
+    try {
+      await api.dockerUpdatesRefresh();
+      location.reload();
+    } catch (e) {
+      toast(String(e.message || e), "err", "UPDATE CHECK");
+      checkBtn.disabled = false;
+      checkBtn.textContent = "⬆ CHECK UPDATES";
+    }
+  });
+
+  const updatePill = updatesRes.error
+    ? el("span", { class: "pill neutral", title: updatesRes.error }, "UPDATE CHECK UNAVAILABLE")
+    : updates.length
+      ? el("span", { class: "pill warn", title: updates.map(u => u.ref).join("\n") },
+          `⬆ ${updates.length} IMAGE UPDATE${updates.length > 1 ? "S" : ""} AVAILABLE`)
+      : updatesRes.ts
+        ? el("span", { class: "pill ok" }, "● IMAGES CURRENT")
+        : el("span", { class: "pill neutral" }, "UPDATES NOT CHECKED YET");
+
   const running = containers.filter(c => c.state === "running").length;
   body.append(
-    toolbar("filter containers…", q => filterRows(body, q), [...scanBtns, analyseBtn]),
+    toolbar("filter containers…", q => filterRows(body, q), [...scanBtns, analyseBtn, checkBtn]),
     ...(hostPanel ? [hostPanel, el("div", { class: "section-gap" })] : []),
     storageOut,
     el("div", { class: "panel" },
-      el("div", { class: "panel-title" }, `DOCKER FLEET — ${running}/${containers.length} RUNNING`),
+      el("div", { class: "panel-title" }, `DOCKER FLEET — ${running}/${containers.length} RUNNING`, updatePill,
+        updatesRes.ts ? el("span", { class: "mono-dim", style: "margin-left:auto;letter-spacing:0" },
+          `registry check ${new Date(updatesRes.ts * 1000).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}`) : null),
       tableWrap(["NAME", "PROJECT", "IMAGE", "STATE", "STATUS", "PORTS", ""], rows)));
 }
 

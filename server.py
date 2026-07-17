@@ -23,7 +23,7 @@ import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from app import ai, monitors, notify, oplog, poller, reports, scanner, smart, store
+from app import ai, monitors, notify, oplog, poller, registry, reports, scanner, smart, store
 from app.connectors import CONNECTORS, docker, homeassistant, proxmox, unifi
 from app.httpclient import HttpError
 
@@ -88,6 +88,8 @@ def route_system_test(_m, p, _b):
         if not s or not s.get("api_key"):
             raise LookupError("AI is not configured — add your Anthropic API key first")
         result = ai.test(s)
+    elif sid == "registries":
+        result = registry.test_credentials()
     elif sid in notify.CHANNEL_IDS:
         result = notify.test_channel(sid)
     elif sid in CONNECTORS:
@@ -194,6 +196,17 @@ def route_proxmox_disks_refresh(_m, _p, _b):
     disks = smart.sweep()
     oplog.add("info", "smart", f"manual SMART sweep: {len(disks)} disk(s) checked")
     return smart.get()
+
+
+def route_docker_updates(_m, _p, _b):
+    return registry.get()
+
+
+def route_docker_updates_refresh(_m, _p, _b):
+    imgs = registry.sweep()
+    ups = sum(1 for i in imgs if i["status"] == "update")
+    oplog.add("info", "registry", f"manual image update check: {ups} update(s) across {len(imgs)} image(s)")
+    return registry.get()
 
 
 def route_docker_storage(_m, _p, _b):
@@ -354,6 +367,8 @@ ROUTES = [
     ("GET",    r"^/api/proxmox/disks$",                                   route_proxmox_disks),
     ("POST",   r"^/api/proxmox/disks/refresh$",                           route_proxmox_disks_refresh),
     ("GET",    r"^/api/docker/storage$",                                  route_docker_storage),
+    ("GET",    r"^/api/docker/updates$",                                  route_docker_updates),
+    ("POST",   r"^/api/docker/updates/refresh$",                          route_docker_updates_refresh),
     ("GET",    r"^/api/storage/roots$",                                   route_scan_roots),
     ("POST",   r"^/api/storage/scan$",                                    route_scan),
     ("GET",    r"^/api/reports$",                                         route_reports_get),
@@ -473,6 +488,7 @@ def main():
     monitors.start()
     reports.start()
     smart.start()
+    registry.start()
     oplog.add("info", "claudeos", f"server started on {args.host}:{args.port}")
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"\n  ┌─ CLAUDEOS ── homelab mission control")
