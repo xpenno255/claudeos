@@ -84,6 +84,14 @@ function tiles(overview, history) {
       big = d.entities_total ?? "—"; unit = "entities";
       sub = st?.ok ? `${d.lights_on ?? 0} lights on · ${d.unavailable ?? 0} unavailable` : "";
       sparkPts = history?.homeassistant?.lights_on;
+    } else if (sys.id === "synology") {
+      big = d.vol_pct != null ? fmtPct(d.vol_pct) : "—"; unit = "volume used";
+      sub = st?.ok ? (d.storage_error
+        ? "⚠ storage stats need an administrators-group user"
+        : `CPU ${fmtPct(d.cpu_pct ?? 0)} · RAM ${fmtPct(d.mem_pct ?? 0)}`
+          + (d.temp_c != null ? ` · ${d.temp_c}°C` : "")
+          + (d.disks_abnormal ? ` · ⚠ ${d.disks_abnormal} disk issue${d.disks_abnormal > 1 ? "s" : ""}` : "")) : "";
+      sparkPts = history?.synology?.cpu_pct;
     }
 
     const configured = cfg?.configured;

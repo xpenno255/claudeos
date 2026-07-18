@@ -67,6 +67,8 @@ export const api = {
   monitorDelete:   (id)          => call("DELETE", `/api/monitors/${id}`),
   monitorsCheck:   ()            => call("POST",   "/api/monitors/check"),
 
+  synologyStorage: ()            => call("GET",    "/api/synology/storage"),
+
   haEntities:      ()            => call("GET",    "/api/ha/entities"),
   haService:       (payload)     => call("POST",   "/api/ha/service", payload),
   haSystem:        ()            => call("GET",    "/api/ha/system"),

@@ -26,6 +26,7 @@ SECRET_FIELDS = {
     "proxmox": ["token_secret"],
     "docker": [],
     "homeassistant": ["token"],
+    "synology": ["password"],
     "ai": ["api_key"],  # Anthropic API key for analysis features
     # container registry credentials (app/registry.py update checks)
     "registries": ["dockerhub_token", "ghcr_token"],
@@ -44,6 +45,7 @@ SYSTEM_LABELS = {
     "proxmox": "Proxmox VE",
     "docker": "Docker",
     "homeassistant": "Home Assistant",
+    "synology": "Synology NAS",
     "ai": "Claude AI",
     "registries": "Container Registries",
     "ntfy": "ntfy",

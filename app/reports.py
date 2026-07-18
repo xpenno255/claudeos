@@ -19,7 +19,7 @@ import threading
 import time
 
 from . import ai, monitors, notify, oplog, poller, registry, smart, store
-from .connectors import docker, homeassistant, proxmox, unifi
+from .connectors import docker, homeassistant, proxmox, synology, unifi
 from .store import DATA_DIR
 
 PATH = os.path.join(DATA_DIR, "reports.json")
@@ -166,6 +166,21 @@ def collect() -> dict:
         else:
             ha["zha"] = zha
         data["systems"]["homeassistant"] = ha
+
+    if (s := _sys("synology")):
+        summ = _try(synology.summary, s)
+        nas = {"summary": summ}
+        st = _try(synology.storage, s)
+        if isinstance(st, dict):
+            nas["abnormal_volumes"] = [
+                f"{v['name']}: {v['status']}" for v in st.get("volumes", [])
+                if v.get("status") not in ("normal", None)]
+            nas["abnormal_disks"] = [
+                f"{d['name']} ({d['model']}): status={d['status']} smart={d['smart']}"
+                for d in st.get("disks", [])
+                if d.get("status") not in ("normal", None)
+                or d.get("smart") not in ("normal", "safe", None)]
+        data["systems"]["synology"] = nas
 
     mons = monitors.list_monitors()
     data["uptime_monitors"] = [

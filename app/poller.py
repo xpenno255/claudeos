@@ -64,6 +64,12 @@ def _metrics_from_summary(system_id: str, s: dict) -> dict:
             "unavailable": s.get("unavailable"),
             "lights_on": s.get("lights_on"),
         }
+    if system_id == "synology":
+        return {
+            "cpu_pct": s.get("cpu_pct"),
+            "mem_pct": s.get("mem_pct"),
+            "vol_pct": s.get("vol_pct"),
+        }
     return {}
 
 

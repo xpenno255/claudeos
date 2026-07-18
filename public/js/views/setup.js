@@ -53,6 +53,18 @@ const FORMS = [
     tls: true,
   },
   {
+    id: "synology",
+    title: "SYNOLOGY NAS — DSM",
+    note: "Create a dedicated DSM user (Control Panel → User & Group) WITHOUT 2-factor auth — the API login can't answer OTP prompts. Storage Manager stats (volumes, disk health) need the administrators group; CPU/RAM works for any user.",
+    fields: [
+      { key: "host", label: "DSM URL", placeholder: "https://192.168.1.50:5001",
+        hint: "http://…:5000 or https://…:5001" },
+      { key: "username", label: "DSM USERNAME", placeholder: "claudeos" },
+      { key: "password", label: "PASSWORD", secret: true },
+    ],
+    tls: true,
+  },
+  {
     id: "registries",
     title: "CONTAINER REGISTRIES — UPDATE CHECKS",
     note: "Optional credentials for the container image update checker (Containers tab). Anonymous checks work, but Docker Hub rate-limits by IP — a free PAT (hub.docker.com → Account Settings → Personal access tokens, read-only) lifts that; for GHCR use a GitHub PAT with read:packages. lscr.io needs no key.",

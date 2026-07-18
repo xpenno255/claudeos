@@ -1,8 +1,8 @@
 # ◈ CLAUDEOS — Homelab Mission Control
 
 An agentic control plane for your homelab: **report, monitor and carry out
-tasks** across a UniFi network (UDM-SE), Proxmox VE, an Ubuntu Docker farm
-and Home Assistant — from one retro-futuristic console.
+tasks** across a UniFi network (UDM-SE), Proxmox VE, an Ubuntu Docker farm,
+Home Assistant and a Synology NAS — from one retro-futuristic console.
 
 Zero build step, zero npm. Python 3.10+ stdlib plus the `cryptography`
 package (already present on most distros).
@@ -26,6 +26,7 @@ the AI features — with automatic retries and typed errors. Plain
 | **Operations → Compute** | VMs/LXCs (start/shutdown/reboot/stop), **datastores** with usage, **node performance** (CPU, IO delay, load, network — from PVE RRD) |
 | **Operations → Containers** | Start/stop/restart, host vitals incl. **GPU utilisation & VRAM history**, on-demand **storage analysis** (largest images / writable layers / volumes, reclaimable space) |
 | **Operations → Home** | HAOS internals (core CPU/RAM, host disk), **add-on states**, **ZHA mesh health** (LQI/RSSI/offline/weak links per device), all entities with toggles, plus two Claude-powered analyses (below) |
+| **Operations → NAS** | Synology DSM vitals (CPU/RAM/temp/uptime + one-hour sparklines), **volumes** with usage meters, **physical disks** with temperature, status and SMART verdicts |
 | **Setup** | Connection details per system, save-and-test, unlink |
 
 ## AI analyses (optional)
@@ -142,6 +143,12 @@ appear on the dashboard and the Containers operations tab.
 **Home Assistant (HAOS)** — profile (bottom-left avatar) → Security →
 Long-lived access tokens → Create. Host: `http://<ha-ip>:8123`.
 
+**Synology NAS (DSM)** — Control Panel → User & Group → create a dedicated
+user **without 2-factor auth** (the API session login can't answer OTP).
+CPU/RAM stats work for any user; the Storage Manager figures (volumes,
+disk SMART) need the administrators group. Host: `http://<nas-ip>:5000`
+or `https://<nas-ip>:5001`.
+
 ## Security model
 
 - Secrets (passwords/tokens) are encrypted at rest with **AES-256-GCM**.
@@ -175,6 +182,7 @@ GET  /api/docker/containers
 POST /api/docker/containers/{id}/{start|stop|restart}
 GET  /api/ha/entities
 POST /api/ha/service          {"domain","service","entity_id","data"}
+GET  /api/synology/storage                             # volumes + disk SMART
 ```
 
 Example: *"restart the plex container"* →
@@ -189,7 +197,7 @@ app/
   httpclient.py         outbound HTTP w/ self-signed-TLS support
   poller.py             30s background poll + metric ring buffers
   oplog.py              audit log (memory + data/opslog.jsonl)
-  connectors/           unifi · proxmox · docker · homeassistant
+  connectors/           unifi · proxmox · docker · homeassistant · synology
 public/                 no-build frontend (ES modules)
 data/                   master key, encrypted config, ops log (created at runtime)
 ```

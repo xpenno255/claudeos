@@ -1,5 +1,5 @@
 // Operations: granular tables + actions per homelab category.
-// Tabs: NETWORK (UniFi) / COMPUTE (Proxmox) / CONTAINERS (Docker) / HOME (HA)
+// Tabs: NETWORK (UniFi) / COMPUTE (Proxmox) / CONTAINERS (Docker) / HOME (HA) / NAS (Synology)
 
 import { api } from "../api.js";
 import { el, fmtBytes, fmtPct, fmtUptime, debounce } from "../util.js";
@@ -11,6 +11,7 @@ const TABS = [
   { tab: "compute",    label: "COMPUTE",    sys: "proxmox" },
   { tab: "containers", label: "CONTAINERS", sys: "docker" },
   { tab: "home",       label: "HOME",       sys: "homeassistant" },
+  { tab: "nas",        label: "NAS",        sys: "synology" },
   { tab: "uptime",     label: "UPTIME",     sys: null },  // service monitors — not tied to one system
   { tab: "reports",    label: "REPORTS",    sys: null },  // scheduled AI health reports
 ];
@@ -41,7 +42,7 @@ export async function renderOps(root, args, { toast }) {
     return;
   }
 
-  const renderers = { network, compute, containers, home, uptime, reports };
+  const renderers = { network, compute, containers, home, nas, uptime, reports };
   await renderers[active](body, toast, overview);
 }
 
@@ -1166,6 +1167,80 @@ function zhaPanel(zha, toast) {
             el("th", { class: h.startsWith(">") ? "num" : "" }, h.replace(/^>/, ""))))),
         el("tbody", {}, ...rows))));
   return panel;
+}
+
+// ------------------------------------------------------------ NAS
+
+async function nas(body, toast, overview) {
+  const [storageRes, history] = await Promise.all([
+    api.synologyStorage().catch(e => ({ error: String(e.message || e) })),
+    api.history().catch(() => ({})),
+  ]);
+  const d = overview.systems?.synology?.data || {};
+
+  // ---- system vitals
+  const sysPanel = el("div", { class: "panel" },
+    el("div", { class: "panel-title" }, `SYSTEM — ${d.model || "SYNOLOGY"}`));
+  sysPanel.append(
+    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px" },
+      d.dsm_version ? el("span", { class: "pill neutral" }, d.dsm_version) : null,
+      d.uptime_s != null ? el("span", { class: "pill neutral" }, `up ${fmtUptime(d.uptime_s)}`) : null,
+      d.temp_c != null
+        ? el("span", { class: `pill ${d.temp_warning ? "warn" : "ok"}` }, `${d.temp_warning ? "⚠ " : ""}${d.temp_c}°C`)
+        : null,
+      d.disks_total
+        ? el("span", { class: `pill ${d.disks_abnormal ? "err" : "ok"}` },
+            d.disks_abnormal ? `✕ ${d.disks_abnormal}/${d.disks_total} DISKS ABNORMAL` : `● ${d.disks_total} DISKS HEALTHY`)
+        : null),
+    meter("CPU", d.cpu_pct, {}),
+    meter("RAM", d.mem_pct, {}));
+  const h = history?.synology || {};
+  if (h.cpu_pct?.length || h.vol_pct?.length) {
+    sysPanel.append(
+      el("div", { class: "mono-dim", style: "margin:12px 0 2px" }, "LAST HOUR"),
+      sparkRow("CPU", h.cpu_pct, { color: BY_ID.synology.hex, format: v => `${v.toFixed(1)}%` }),
+      sparkRow("RAM", h.mem_pct, { color: "#9085e9", format: v => `${v.toFixed(1)}%` }),
+      sparkRow("VOLUME", h.vol_pct, { color: "#3987e5", format: v => `${v.toFixed(1)}%` }));
+  }
+
+  // ---- volumes
+  const volPanel = el("div", { class: "panel" },
+    el("div", { class: "panel-title" }, "VOLUMES"));
+  const volumes = storageRes.volumes || d.volumes || [];
+  if (storageRes.error && !volumes.length) {
+    volPanel.append(el("div", { class: "mono-dim" }, `⚠ ${storageRes.error}`));
+  } else if (!volumes.length) {
+    volPanel.append(el("div", { class: "mono-dim" }, "no volumes reported"));
+  } else {
+    for (const v of volumes) {
+      volPanel.append(
+        el("div", { style: "display:flex;gap:10px;align-items:baseline;margin-top:8px" },
+          statePill(v.status, ["normal"]),
+          el("b", { style: "letter-spacing:.06em" }, v.name || v.id),
+          el("span", { class: "mono-dim" }, v.fs || "")),
+        meter("USED", v.pct, { detail: v.total ? `${fmtBytes(v.used)} / ${fmtBytes(v.total)}` : "" }));
+    }
+  }
+
+  // ---- physical disks
+  const diskRows = (storageRes.disks || []).map(dk => el("tr", { "data-k": `${dk.name} ${dk.model} ${dk.serial || ""}`.toLowerCase() },
+    el("td", { class: "strong" }, dk.name),
+    el("td", {}, dk.model || "—"),
+    el("td", { class: "mono-dim" }, dk.serial || "—"),
+    el("td", { class: "num" }, dk.size ? fmtBytes(dk.size) : "—"),
+    el("td", { class: "num" }, dk.temp_c != null ? `${dk.temp_c}°C` : "—"),
+    el("td", {}, statePill(dk.status, ["normal"])),
+    el("td", {}, statePill(dk.smart, ["normal", "safe"]))));
+  const diskPanel = el("div", { class: "panel" },
+    el("div", { class: "panel-title" }, `PHYSICAL DISKS — ${diskRows.length}`),
+    storageRes.error && !diskRows.length
+      ? el("div", { class: "mono-dim" }, `⚠ ${storageRes.error}`)
+      : tableWrap(["BAY", "MODEL", "SERIAL", ">SIZE", ">TEMP", "STATUS", "SMART"], diskRows));
+
+  body.append(
+    el("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:14px" }, sysPanel, volPanel),
+    el("div", { class: "section-gap" }),
+    diskPanel);
 }
 
 // ------------------------------------------------------------ UPTIME

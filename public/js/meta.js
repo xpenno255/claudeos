@@ -6,6 +6,7 @@ export const SYSTEMS = [
   { id: "proxmox",       label: "PROXMOX VE",     tab: "compute",    color: "var(--s-proxmox)", hex: "#199e70" },
   { id: "docker",        label: "DOCKER FLEET",   tab: "containers", color: "var(--s-docker)",  hex: "#c98500" },
   { id: "homeassistant", label: "HOME ASSISTANT", tab: "home",       color: "var(--s-ha)",      hex: "#9085e9" },
+  { id: "synology",      label: "SYNOLOGY NAS",   tab: "nas",        color: "var(--s-syno)",    hex: "#d55181" },
 ];
 
 export const BY_ID = {

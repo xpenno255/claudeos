@@ -24,7 +24,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from app import ai, monitors, notify, oplog, poller, registry, reports, scanner, smart, store
-from app.connectors import CONNECTORS, docker, homeassistant, proxmox, unifi
+from app.connectors import CONNECTORS, docker, homeassistant, proxmox, synology, unifi
 from app.httpclient import HttpError
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -289,6 +289,10 @@ def route_reports_config(_m, _p, body):
     return {"ok": True, "config": cfg}
 
 
+def route_synology_storage(_m, _p, _b):
+    return synology.storage(_settings("synology"))
+
+
 def route_ha_system(_m, _p, _b):
     return homeassistant.system_info(_settings("homeassistant"))
 
@@ -393,6 +397,7 @@ ROUTES = [
     ("POST",   r"^/api/monitors/check$",                                  route_monitors_check),
     ("POST",   r"^/api/monitors/(?P<mid>[0-9a-f]+)$",                     route_monitor_update),
     ("DELETE", r"^/api/monitors/(?P<mid>[0-9a-f]+)$",                     route_monitor_delete),
+    ("GET",    r"^/api/synology/storage$",                                route_synology_storage),
     ("GET",    r"^/api/ha/system$",                                       route_ha_system),
     ("GET",    r"^/api/ha/zha$",                                          route_ha_zha),
     ("GET",    r"^/api/ha/updates$",                                      route_ha_updates),
