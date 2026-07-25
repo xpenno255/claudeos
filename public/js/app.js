@@ -7,6 +7,7 @@ import { renderDashboard } from "./views/dashboard.js";
 import { renderOps } from "./views/ops.js";
 import { renderSetup } from "./views/setup.js";
 import { renderChat } from "./views/chat.js";
+import { renderLabIssues } from "./views/labissues.js";
 
 const viewRoot = document.getElementById("view");
 const crumb = document.getElementById("crumb");
@@ -32,6 +33,7 @@ const ROUTES = {
   ops:       { title: "OPERATIONS", render: renderOps },
   chat:      { title: "OPS CHAT", render: renderChat },
   setup:     { title: "SETUP", render: renderSetup },
+  labissues: { title: "LAB ISSUES", render: renderLabIssues },
 };
 
 function currentRoute() {

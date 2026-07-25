@@ -80,4 +80,6 @@ export const api = {
   haUpdates:       ()            => call("GET",    "/api/ha/updates"),
   haAnalyzeLogs:   ()            => call("POST",   "/api/ha/analyze-logs"),
   haZhaInsights:   ()            => call("POST",   "/api/ha/zha-insights"),
+
+  labIssues:       ()            => call("GET",    "/api/labissues"),
 };
