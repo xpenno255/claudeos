@@ -339,6 +339,10 @@ commit `85d64ee`) — **rewrite it properly**, do not promote prototype code.
   reboot/shutdown of a running guest, unifi device restart (clients on that device drop),
   and climate setpoint changes.
 - **Composer pinned at the bottom** of the column; SEND becomes **■ STOP** while streaming.
+  While an approval is **pending**, the composer is **disabled** with a hint to resolve the
+  pending action first — a suspended turn is still in flight (§13), so accepting a new question
+  there would either be dropped by the one-turn rule or race the resume. (Caught by visual
+  review of the prototype, which left the composer live in that state.)
 - **Cost readout** right-aligned immediately above the composer.
 - **Terminal states render in the flow** where the next turn would be: "CONVERSATION FULL"
   with a new-conversation action, and "STREAM INTERRUPTED — no changes were made" with a
