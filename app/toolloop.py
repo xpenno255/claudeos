@@ -25,6 +25,13 @@ Everything the caller needs to observe comes back as `(event, payload)` pairs.
 Ops Chat serialises them to SSE; a headless caller ignores the ones it does not
 need. The two terminal events (`finished`, `suspended`) always carry the run's
 accounting, including on the error path — spend that happened must be recorded.
+
+A run ends in one of three ways. Tools are always withheld on the final call, so
+the model cannot ask for something we would have to refuse. Without
+`final_schema` that call answers in prose, which is what Ops Chat wants. With
+one, it answers as schema-validated JSON instead — the third ending, added for
+triage, where the caller needs data with prose as one field rather than prose it
+would have to parse.
 """
 
 import datetime
@@ -61,6 +68,31 @@ def budget_reached(used: int, budget: int = CONTEXT_BUDGET) -> bool:
     return used >= budget * CONTEXT_FULL_AT
 API_TIMEOUT = 600
 MAX_TOOL_RESULT = 60_000       # characters of rendered envelope per tool_result
+
+
+# ------------------------------------------------------------ system prompt
+
+# The loop takes its system blocks as a parameter — this constant is not a
+# default, it is the text that is *true for every caller*: what the lab is, how
+# to work the tool tiers, and what a result status means. Each caller
+# concatenates it with its own halves (see chat.SYSTEM_PROMPT and
+# labissues.TRIAGE_PROMPT). Kept here rather than in either caller so neither
+# has to import the other.
+BASE_PROMPT = """The lab: a UniFi network (UDM-SE gateway, switches, access points), a Proxmox host running VMs and LXC containers, an Ubuntu VM running a Docker fleet with an NVIDIA GPU passed through, Home Assistant (HAOS) with a large Zigbee/ZHA mesh, and a Synology NAS.
+
+Deliberately vague above: model numbers, hostnames, IPs, container names and capacities are NOT stated here because they change. Get every specific from a tool. If you name a piece of hardware, that name must have come from a tool result on this turn.
+
+## Using tools
+
+Start with the tier-1 tools (get_lab_overview, get_metric_history, get_ops_log, get_uptime_monitors) — they are cheap, broad, and precomputed. Reach for a per-connector tool once you know where to look. If no tool exposes what you need, say so plainly rather than guessing; do not speculate about data you could not fetch.
+
+Tool results carry a status. `success` has data. `no_data` means the query worked and found nothing — that is NOT the same as healthy, and never report it as such. `error` means the query failed, so that area is unverified. When a result reports omitted items or truncated output, any conclusion you draw from the visible part must say so."""
+
+# Sent as a user turn when the model stops calling tools before the ceiling and
+# a structured ending was asked for. Two assistant messages cannot sit next to
+# each other, so the final call needs a turn to answer.
+FINAL_PROMPT = ("Now give your result in the required structured format. "
+                "Do not call any more tools.")
 
 # Sonnet 5 list price is $3/$15 per MTok, with introductory $2/$10 running to
 # 2026-08-31. Cache writes bill 1.25x input, reads 0.1x.
@@ -150,7 +182,7 @@ def tool_result(tool_use_id: str, env: dict) -> dict:
 def run(client, messages: list, *, schemas: list, system: list,
         approval=None, model: str = MODEL, max_tokens: int = MAX_TOKENS,
         effort: str = EFFORT, max_iterations: int = MAX_ITERATIONS,
-        context_budget: int = CONTEXT_BUDGET):
+        context_budget: int = CONTEXT_BUDGET, final_schema: dict | None = None):
     """Drive the tool loop over `messages`, yielding (event, payload) pairs.
 
     `messages` is appended to in place, so the caller keeps the transcript it
@@ -163,19 +195,29 @@ def run(client, messages: list, *, schemas: list, system: list,
     the loop hands the model an error instead, which is what makes a read-only
     schema list an actual guarantee rather than a convention.
 
+    `final_schema` switches the ending mode. Given one, the last call drops
+    tools *and* asks for a response validated against that JSON schema, and the
+    parsed object comes back on the terminal event as `structured`. The final
+    call happens whether the ceiling was reached or the model simply stopped
+    asking for tools — the latter is the common case, and it is not an ending in
+    this mode, because a caller that asked for data must not be handed prose.
+    Without a schema the run ends in prose and `structured` is None, which is
+    Ops Chat's behaviour and is unchanged.
+
     Events: `token`, `tool_start`, `tool_result`, `approval_required`, `error`,
     and exactly one terminal `finished` or `suspended` carrying
-    {cost, tools, usage, error}. `suspended` means the approval hook fired and
-    the run stopped mid-turn; the caller resumes by calling run again with the
-    tool_result blocks appended to `messages`.
+    {cost, tools, usage, error, structured}. `suspended` means the approval hook
+    fired and the run stopped mid-turn; the caller resumes by calling run again
+    with the tool_result blocks appended to `messages`.
     """
     run_cost, run_tools, usage_last, failure = 0.0, 0, None, None
+    structured, ending = None, False
     # Duplicate-call guard is per RUN, not per conversation: a follow-up
     # "check again now" must be able to re-run the same query.
     seen: set = set()
 
     for step in range(max_iterations):
-        last_step = step == max_iterations - 1
+        last_step = ending or step == max_iterations - 1
         kwargs = {
             "model": model,
             "max_tokens": max_tokens,
@@ -188,6 +230,9 @@ def run(client, messages: list, *, schemas: list, system: list,
         # rather than a tool call we would have to refuse.
         if not last_step:
             kwargs["tools"] = schemas
+        elif final_schema is not None:
+            kwargs["output_config"]["format"] = {"type": "json_schema",
+                                                 "schema": final_schema}
 
         try:
             with client.messages.stream(**kwargs) as stream:
@@ -215,6 +260,19 @@ def run(client, messages: list, *, schemas: list, system: list,
             if reply.stop_reason == "max_tokens":
                 failure = "the reply hit the token cap and was cut short"
                 yield "error", {"message": failure}
+            if final_schema is not None and failure is None:
+                if last_step:
+                    structured, failure = _structured(reply)
+                    if failure:
+                        yield "error", {"message": failure}
+                else:
+                    # The model has finished gathering evidence before the
+                    # ceiling — the ordinary way a run ends. In this mode that
+                    # is not the ending: one more call, without tools, turns
+                    # what it concluded into the data the caller asked for.
+                    ending = True
+                    messages.append({"role": "user", "content": FINAL_PROMPT})
+                    continue
             break
 
         # Enforced here, before dispatching another round of tool calls, so the
@@ -279,10 +337,30 @@ def run(client, messages: list, *, schemas: list, system: list,
 
         if pending:
             yield "suspended", {"cost": run_cost, "tools": run_tools,
-                                "usage": usage_last, "error": failure}
+                                "usage": usage_last, "error": failure,
+                                "structured": structured}
             return
 
         messages.append({"role": "user", "content": results})
 
     yield "finished", {"cost": run_cost, "tools": run_tools, "usage": usage_last,
-                       "error": failure}
+                       "error": failure, "structured": structured}
+
+
+def _structured(reply) -> tuple:
+    """The final schema-validated reply, as (parsed, failure).
+
+    The format constraint means the text blocks hold JSON, but a run can still
+    end here with nothing usable — a refusal, or a reply cut short. Report that
+    as a failure rather than raising, so the caller still sees what was spent.
+    """
+    text = "".join(b.text for b in reply.content if b.type == "text")
+    if not text.strip():
+        return None, f"the run returned no result (stop_reason: {reply.stop_reason})"
+    try:
+        parsed = json.loads(text)
+    except ValueError as e:
+        return None, f"the final result was not valid JSON: {e}"
+    if not isinstance(parsed, dict):
+        return None, f"the final result was a {type(parsed).__name__}, expected an object"
+    return parsed, None

@@ -184,6 +184,7 @@ GET  /api/ha/entities
 POST /api/ha/service          {"domain","service","entity_id","data"}
 GET  /api/synology/storage                             # volumes + disk SMART
 GET  /api/labissues                                    # lab issue queue + triage state
+POST /api/labissues/{number}/triage                    # triage one issue now
 ```
 
 Example: *"restart the plex container"* →
