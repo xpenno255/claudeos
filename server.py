@@ -23,7 +23,8 @@ import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from app import ai, monitors, notify, oplog, poller, registry, reports, scanner, smart, store
+from app import (ai, chat, monitors, notify, oplog, poller, registry, reports, scanner,
+                 smart, store)
 from app.connectors import CONNECTORS, docker, homeassistant, proxmox, synology, unifi
 from app.httpclient import HttpError
 
@@ -293,6 +294,22 @@ def route_synology_storage(_m, _p, _b):
     return synology.storage(_settings("synology"))
 
 
+# ------------------------------------------------------------------ chat
+
+def route_chats_list(_m, _p, _b):
+    return {"conversations": chat.list_conversations(), "available": chat.HAS_SDK,
+            "model": chat.MODEL}
+
+
+def route_chat_get(_m, p, _b):
+    return chat.get_conversation(p["cid"])
+
+
+def route_chat_delete(_m, p, _b):
+    chat.delete_conversation(p["cid"])
+    return {"ok": True}
+
+
 def route_ha_system(_m, _p, _b):
     return homeassistant.system_info(_settings("homeassistant"))
 
@@ -398,6 +415,9 @@ ROUTES = [
     ("POST",   r"^/api/monitors/(?P<mid>[0-9a-f]+)$",                     route_monitor_update),
     ("DELETE", r"^/api/monitors/(?P<mid>[0-9a-f]+)$",                     route_monitor_delete),
     ("GET",    r"^/api/synology/storage$",                                route_synology_storage),
+    ("GET",    r"^/api/chats$",                                          route_chats_list),
+    ("GET",    r"^/api/chats/(?P<cid>[0-9a-f]+)$",                        route_chat_get),
+    ("DELETE", r"^/api/chats/(?P<cid>[0-9a-f]+)$",                        route_chat_delete),
     ("GET",    r"^/api/ha/system$",                                       route_ha_system),
     ("GET",    r"^/api/ha/zha$",                                          route_ha_zha),
     ("GET",    r"^/api/ha/updates$",                                      route_ha_updates),
@@ -441,6 +461,68 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    # -------------------------------------------------------- SSE
+    def _sse_open(self):
+        """Start a text/event-stream response. Deliberately sends no
+        Content-Length: at the handler's default HTTP/1.0, connection-close
+        delimits the body, so no chunked framing is needed. wfile is unbuffered,
+        so each write reaches the wire immediately."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Accel-Buffering", "no")  # defeat proxy buffering
+        self.end_headers()
+
+    def _sse_send(self, event, payload):
+        self.wfile.write(f"event: {event}\ndata: {json.dumps(payload, default=str)}\n\n"
+                         .encode("utf-8"))
+
+    def _stream(self, make_generator):
+        """Drive a (event, payload) generator to SSE.
+
+        The generator runs on a worker thread so this one can emit `: ping`
+        heartbeats while a slow tool call blocks — without them a dead peer
+        isn't noticed until the tool returns, and an intermediate proxy may
+        time the connection out.
+        """
+        import queue as _queue
+
+        q: _queue.Queue = _queue.Queue()
+
+        def produce():
+            try:
+                for event, payload in make_generator():
+                    q.put((event, payload))
+            except (LookupError, ValueError) as e:
+                q.put(("error", {"message": str(e)}))
+            except Exception as e:  # noqa: BLE001
+                traceback.print_exc()
+                q.put(("error", {"message": f"internal error: {e}"}))
+            finally:
+                q.put(None)
+
+        worker = threading.Thread(target=produce, daemon=True)
+        try:
+            self._sse_open()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        worker.start()
+        try:
+            while True:
+                try:
+                    item = q.get(timeout=15)
+                except _queue.Empty:
+                    self.wfile.write(b": ping\n\n")   # comment frame = keepalive
+                    continue
+                if item is None:
+                    break
+                self._sse_send(*item)
+            self._sse_send("done", {})
+        except (BrokenPipeError, ConnectionResetError):
+            # Tab closed mid-stream. Normal end — the worker finishes on its own
+            # (an approved write must still complete and be logged).
+            pass
+
     # -------------------------------------------------------- dispatch
     def _read_body(self):
         length = int(self.headers.get("Content-Length") or 0)
@@ -454,6 +536,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def _dispatch(self, method):
         path = urllib.parse.urlparse(self.path).path
+
+        # Streaming chat routes bypass the JSON wrapper entirely.
+        if method == "POST" and path in ("/api/chat/stream",):
+            body = self._read_body() or {}
+            return self._stream(lambda: chat.run_turn(
+                str(body.get("message", "")).strip(), body.get("conversation_id")))
+        m = re.match(r"^/api/chat/(?P<cid>[0-9a-f]+)/approve$", path)
+        if method == "POST" and m:
+            body = self._read_body() or {}
+            cid = m.group("cid")
+            return self._stream(lambda: chat.run_approval(
+                cid, str(body.get("pending_id", "")),
+                str(body.get("decision", "deny")),
+                str(body.get("guidance", ""))))
+
         if path.startswith("/api/"):
             for m, pattern, fn in ROUTES:
                 if m != method:
@@ -509,6 +606,7 @@ def main():
     reports.start()
     smart.start()
     registry.start()
+    chat.start()   # invalidates any pending write-approval left by a restart
     oplog.add("info", "claudeos", f"server started on {args.host}:{args.port}")
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"\n  ┌─ CLAUDEOS ── homelab mission control")

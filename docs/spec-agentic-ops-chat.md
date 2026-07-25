@@ -68,8 +68,13 @@ the prompt**. A system-prompt instruction to "please confirm first" is not a gat
 
 - Model `claude-sonnet-5`; adaptive thinking, effort `medium` **(tunable)**.
 - `max_tokens` 8192 per turn **(tunable)**.
-- `strict: true` on every tool schema (`additionalProperties: false`), so write-tool
-  arguments rendered in the confirmation card are schema-guaranteed.
+- `strict: true` on the **four write tools only** (`additionalProperties: false`
+  everywhere regardless). The API caps strict tools at **20 per request** and this
+  catalog is 31, so the budget goes where the spec's rationale actually pointed:
+  guaranteeing that write arguments rendered in the confirmation card are
+  schema-valid. A malformed read call simply returns an `error` envelope the model
+  recovers from. *(Corrected during the build — the original text said "every tool
+  schema", which the API rejects with `Too many strict tools`.)*
 - **Prompt caching from day one**: one breakpoint after tools+system, a second on
   the conversation tail. The loop re-sends history every iteration, so caching
   matters more than model choice. Keep the system prompt frozen and tool ordering

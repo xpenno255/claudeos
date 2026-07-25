@@ -266,6 +266,48 @@ def exec_run(settings: dict, cid: str, cmd: list, timeout: int = 20) -> str:
     return b"".join(out).decode("utf-8", errors="replace")
 
 
+def _demux(raw: bytes) -> str:
+    """Docker's raw stream framing: 8-byte header (type, pad×3, len×4) per
+    frame. A TTY-enabled container streams plain bytes instead, which shows up
+    as a first byte outside the 0-2 stream-type range — pass those through."""
+    if raw[:1] not in (b"\x00", b"\x01", b"\x02"):
+        return raw.decode("utf-8", errors="replace")
+    out, i = [], 0
+    while i + 8 <= len(raw):
+        size = int.from_bytes(raw[i + 4:i + 8], "big")
+        out.append(raw[i + 8:i + 8 + size])
+        i += 8 + size
+    return b"".join(out).decode("utf-8", errors="replace")
+
+
+def container_logs(settings: dict, cid: str, tail: int = 100, timeout: int = 20) -> str:
+    """Recent stdout+stderr for one container.
+
+    Needs LOGS=1 on a socket-proxy (it is a separate permission from
+    CONTAINERS). The endpoint returns a raw framed stream rather than JSON, so
+    it bypasses httpclient's JSON handling.
+    """
+    import urllib.error
+    import urllib.request
+
+    url = (_base(settings) + f"/containers/{cid}/logs"
+           f"?stdout=1&stderr=1&timestamps=1&tail={int(tail)}")
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url), timeout=timeout) as resp:
+            return _demux(resp.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")
+        if e.code in (403, 401):
+            raise httpclient.HttpError(
+                e.code, "the Docker socket-proxy refused /logs — set LOGS=1 on "
+                        "tecnativa/docker-socket-proxy to allow it", body,
+                headers=e.headers) from e
+        raise httpclient.HttpError(e.code, f"HTTP {e.code} from container logs",
+                                   body, headers=e.headers) from e
+    except urllib.error.URLError as e:
+        raise ConnectionError(f"cannot reach the Docker engine: {e.reason}") from e
+
+
 def _has_gpu(insp: dict) -> bool:
     hc = insp.get("HostConfig") or {}
     if hc.get("Runtime") == "nvidia":

@@ -69,6 +69,10 @@ export const api = {
 
   synologyStorage: ()            => call("GET",    "/api/synology/storage"),
 
+  chats:           ()            => call("GET",    "/api/chats"),
+  chat:            (id)          => call("GET",    `/api/chats/${id}`),
+  chatDelete:      (id)          => call("DELETE", `/api/chats/${id}`),
+
   haEntities:      ()            => call("GET",    "/api/ha/entities"),
   haService:       (payload)     => call("POST",   "/api/ha/service", payload),
   haSystem:        ()            => call("GET",    "/api/ha/system"),

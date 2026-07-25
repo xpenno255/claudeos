@@ -6,6 +6,7 @@ import { SYSTEMS } from "./meta.js";
 import { renderDashboard } from "./views/dashboard.js";
 import { renderOps } from "./views/ops.js";
 import { renderSetup } from "./views/setup.js";
+import { renderChat } from "./views/chat.js";
 
 const viewRoot = document.getElementById("view");
 const crumb = document.getElementById("crumb");
@@ -29,6 +30,7 @@ export function toast(msg, kind = "info", title = "CLAUDEOS") {
 const ROUTES = {
   dashboard: { title: "DASHBOARD", render: renderDashboard },
   ops:       { title: "OPERATIONS", render: renderOps },
+  chat:      { title: "OPS CHAT", render: renderChat },
   setup:     { title: "SETUP", render: renderSetup },
 };
 
