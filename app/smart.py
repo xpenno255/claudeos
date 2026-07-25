@@ -13,7 +13,7 @@ import re
 import threading
 import time
 
-from . import notify, oplog, store
+from . import notify, oplog, store, sweeper
 from .connectors import proxmox
 
 SWEEP_INTERVAL = 6 * 3600
@@ -175,12 +175,5 @@ def get(max_age: int = SWEEP_INTERVAL) -> dict:
 
 
 def start() -> None:
-    def loop():
-        while True:
-            try:
-                sweep()
-            except Exception as e:  # noqa: BLE001
-                oplog.add("error", "smart", f"SMART sweep failed: {e}")
-            time.sleep(SWEEP_INTERVAL)
-
-    threading.Thread(target=loop, name="claudeos-smart", daemon=True).start()
+    sweeper.spawn("smart", sweep, SWEEP_INTERVAL,
+                  system="smart", error="SMART sweep failed")

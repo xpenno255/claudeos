@@ -24,7 +24,7 @@ import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
-from . import notify, oplog
+from . import notify, oplog, sweeper
 from .httpclient import request
 from .store import DATA_DIR
 
@@ -223,12 +223,6 @@ def check_all() -> None:
 
 
 def start() -> None:
-    def loop():
-        while True:
-            try:
-                check_all()
-            except Exception as e:  # noqa: BLE001
-                oplog.add("error", "monitor", f"check loop error: {e}")
-            time.sleep(CHECK_INTERVAL)
-
-    threading.Thread(target=loop, name="claudeos-monitors", daemon=True).start()
+    # thread "claudeos-monitors", but the ops-log tag has always been singular
+    sweeper.spawn("monitors", check_all, CHECK_INTERVAL,
+                  system="monitor", error="check loop error")

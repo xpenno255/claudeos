@@ -21,7 +21,7 @@ import threading
 import time
 import urllib.parse
 
-from . import notify, oplog, store
+from . import notify, oplog, store, sweeper
 from .connectors import docker
 from .httpclient import HttpError, request
 
@@ -201,12 +201,5 @@ def get(max_age: int = SWEEP_INTERVAL) -> dict:
 
 
 def start() -> None:
-    def loop():
-        while True:
-            try:
-                sweep()
-            except Exception as e:  # noqa: BLE001
-                oplog.add("error", "registry", f"image update sweep failed: {e}")
-            time.sleep(SWEEP_INTERVAL)
-
-    threading.Thread(target=loop, name="claudeos-registry", daemon=True).start()
+    sweeper.spawn("registry", sweep, SWEEP_INTERVAL,
+                  system="registry", error="image update sweep failed")

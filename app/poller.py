@@ -9,7 +9,7 @@ import threading
 import time
 from collections import deque
 
-from . import notify, oplog, store
+from . import notify, oplog, store, sweeper
 from .connectors import CONNECTORS
 
 POLL_INTERVAL = 30
@@ -117,13 +117,5 @@ def history() -> dict:
 
 
 def start() -> None:
-    def loop():
-        while True:
-            try:
-                poll_once()
-            except Exception as e:  # noqa: BLE001
-                oplog.add("error", "poller", f"poll loop error: {e}")
-            time.sleep(POLL_INTERVAL)
-
-    t = threading.Thread(target=loop, name="claudeos-poller", daemon=True)
-    t.start()
+    sweeper.spawn("poller", poll_once, POLL_INTERVAL,
+                  system="poller", error="poll loop error")
