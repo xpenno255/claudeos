@@ -42,6 +42,22 @@ PAT_HINT = ("Repository access → Only select repositories, "
             "Permissions → Issues: Read and write")
 
 
+def _hdr(hdrs, name: str) -> str:
+    """Read one response header, whatever the container.
+
+    Production hands us an `http.client.HTTPMessage`, which is already
+    case-insensitive; a plain dict is not, and HTTP/2 puts these header names
+    on the wire in lower case. Normalising here means a test double behaves
+    like the real thing instead of passing by luck of capitalisation.
+    """
+    if hdrs is None:
+        return ""
+    got = hdrs.get(name)
+    if got is None and hasattr(hdrs, "items"):
+        got = next((v for k, v in hdrs.items() if k.lower() == name.lower()), None)
+    return (got or "").strip()
+
+
 def _headers(token: str) -> dict:
     # caller headers win over httpclient's Accept: application/json default
     return {
@@ -84,7 +100,6 @@ def _explain(e: HttpError, repo: str) -> Exception:
     """Map a GitHub status onto this app's exception taxonomy, in words a
     homelab owner can act on. ConnectionError → 502, LookupError → 404,
     ValueError → 400 (see server._dispatch)."""
-    hdrs = e.headers
     if e.status == 401:
         return ConnectionError(
             "GitHub rejected the access token (401) — it is invalid, revoked or expired; "
@@ -98,8 +113,8 @@ def _explain(e: HttpError, repo: str) -> Exception:
             f"looks exactly like a missing one, so check both: the spelling of owner/name, "
             f"and that the token grants {PAT_HINT} on this repo")
     if e.status == 403:
-        if hdrs is not None and (hdrs.get("X-RateLimit-Remaining") or "").strip() == "0":
-            reset = (hdrs.get("X-RateLimit-Reset") or "?").strip()
+        if _hdr(e.headers, "X-RateLimit-Remaining") == "0":
+            reset = _hdr(e.headers, "X-RateLimit-Reset") or "?"
             return ConnectionError(
                 f"GitHub rate limit exhausted (403) — the token has no requests left this "
                 f"hour (resets at unix {reset}); the credentials themselves look fine")
@@ -141,7 +156,7 @@ def test() -> dict:
     visibility = "private" if info.get("private") else "public"
     seen = len(issues or [])
     backlog = "at least 1 open issue" if seen else "no open issues right now"
-    remaining = (hdrs.get("X-RateLimit-Remaining") or "?").strip() if hdrs else "?"
+    remaining = _hdr(hdrs, "X-RateLimit-Remaining") or "?"
     return {"ok": True,
             "detail": f"{full} reachable ({visibility}) — issues readable, {backlog}; "
                       f"{remaining} API requests left this hour"}
@@ -181,7 +196,7 @@ def _project(issue: dict) -> dict:
     }
 
 
-def _backoff_until(e: HttpError) -> float | None:
+def _backoff_until(e) -> float | None:
     """When GitHub says to stop asking, until when.
 
     `retry-after` (seconds) wins where present — the docs put it first, and it
@@ -189,14 +204,14 @@ def _backoff_until(e: HttpError) -> float | None:
     only when `x-ratelimit-remaining` is exactly 0, and `x-ratelimit-reset` is
     an absolute UTC epoch, not a delta.
     """
-    hdrs = e.headers
-    if hdrs is None or e.status not in (403, 429):
+    hdrs = getattr(e, "headers", None)
+    if hdrs is None or getattr(e, "status", None) not in (403, 429):
         return None
-    retry_after = (hdrs.get("Retry-After") or "").strip()
+    retry_after = _hdr(hdrs, "Retry-After")
     if retry_after.isdigit():
         return time.time() + int(retry_after)
-    if (hdrs.get("X-RateLimit-Remaining") or "").strip() == "0":
-        reset = (hdrs.get("X-RateLimit-Reset") or "").strip()
+    if _hdr(hdrs, "X-RateLimit-Remaining") == "0":
+        reset = _hdr(hdrs, "X-RateLimit-Reset")
         if reset.isdigit():
             return float(reset)
     return None
@@ -212,11 +227,13 @@ def sweep(fetch=None) -> dict:
     if fetch is None:
         try:
             repo, token = settings()
-        except LookupError as e:
-            # Not configured yet. Record it and return quietly rather than
-            # raising: the sweeper would otherwise write the same ops-log line
-            # every SWEEP_INTERVAL on an install that has simply not set this
-            # up. Not covered by a test — the seam bypasses config entirely.
+        except (LookupError, ValueError) as e:
+            # Unusable config — not set up yet (LookupError), or set up wrong
+            # (ValueError: a pasted URL, a malformed owner/name). Record it and
+            # return quietly rather than raising: no request can be built, so
+            # retrying in 60s changes nothing, and the sweeper's handler would
+            # write the identical ops-log line every minute forever. The UI
+            # still sees the reason, which is the half that must not be quiet.
             with _lock:
                 _cache["error"] = str(e)
             return snapshot()
@@ -234,22 +251,19 @@ def sweep(fetch=None) -> dict:
 
     try:
         status, payload, headers = fetch(etag)
-    except HttpError as e:
-        until = _backoff_until(e)
-        with _lock:
-            _cache["error"] = str(e)
-            if until:
-                _cache["backoff_until"] = until
-                _cache["error"] = (f"GitHub rate limit reached — not asking again until "
-                                   f"unix {int(until)}")
-        raise
     except Exception as e:
         # Record it where the UI can see it, then re-raise so the sweeper
         # thread's own handler puts it in the ops log. What must NOT happen is
         # the cache being cleared: a failed sweep means the issue state is
         # unknown, which is a different thing from there being no issues.
+        until = _backoff_until(e)
         with _lock:
-            _cache["error"] = str(e)
+            if until:
+                _cache["backoff_until"] = until
+                _cache["error"] = (f"GitHub rate limit reached — not asking again "
+                                   f"until unix {int(until)}")
+            else:
+                _cache["error"] = str(e)
         raise
 
     if status != 304 and not isinstance(payload, list):
@@ -299,7 +313,13 @@ def _list_issues(repo: str, token: str, etag: str | None):
     except HttpError as e:
         if e.status == 304:
             return 304, None, e.headers
-        raise
+        # Same actionable prose the Setup TEST button gives. Without this the
+        # sweep reports "HTTP 401 from api.github.com…", which tells a homelab
+        # owner nothing about minting a new token. The wire details ride along
+        # so the caller can still read rate-limit headers off it.
+        mapped = _explain(e, repo)
+        mapped.status, mapped.headers = e.status, e.headers
+        raise mapped from e
     # Pagination is not followed: a lab repo with more than 100 open incidents
     # has a bigger problem than this sweep. Say so rather than silently
     # truncating the backlog.

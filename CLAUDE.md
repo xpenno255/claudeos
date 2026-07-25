@@ -16,6 +16,8 @@ its GitHub caller as an argument and its failure modes (re-triage loops, budget
 overruns) are silent and expensive. The rest of the app has no tests and this is
 not a request to backfill them; add a seam only where a module earns one.
 
+## Agent skills
+
 ### Issue tracker
 
 Issues are tracked in GitHub Issues (`xpenno255/claudeos`) via the `gh` CLI. See `docs/agents/issue-tracker.md`.

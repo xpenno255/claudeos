@@ -9,7 +9,10 @@ reaching into private state.
 """
 
 import importlib
+import os
+import shutil
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -17,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import labissues as _labissues  # noqa: E402
+from app import store as _store  # noqa: E402
 from app.httpclient import HttpError  # noqa: E402
 
 
@@ -64,18 +68,37 @@ class SweepTest(unittest.TestCase):
         self.assertEqual([i["number"] for i in snap["issues"]], [1])
         self.assertIsNone(snap["error"])
 
-    def test_a_failed_fetch_records_the_error_and_keeps_the_last_good_issues(self):
-        """A rejected token must never read as "no open issues". It raises too,
-        so the sweeper thread records it in the ops log."""
+    def test_a_rejected_token_records_the_error_and_keeps_the_last_good_issues(self):
+        """A revoked token must never read as "no open issues". It re-raises so
+        the sweeper thread logs it.
+
+        The friendly wording ("mint a new fine-grained token") is applied a
+        layer below this seam, where the repo name is known — so this asserts
+        the structural contract, not the prose.
+        """
         self.labissues.sweep(fetch=fake(200, [ISSUE], {"ETag": 'W/"abc"'}))
 
-        rejected = LookupError("the token cannot see this repository")
-        with self.assertRaises(LookupError):
-            self.labissues.sweep(fetch=fake(raises=rejected))
+        revoked = HttpError(401, "HTTP 401", "", headers={})
+        with self.assertRaises(HttpError):
+            self.labissues.sweep(fetch=fake(raises=revoked))
 
         snap = self.labissues.snapshot()
         self.assertEqual([i["number"] for i in snap["issues"]], [1], "last good issues lost")
-        self.assertIn("cannot see", snap["error"])
+        self.assertTrue(snap["error"], "a rejected token left no error to show")
+        self.assertIsNone(snap["backoff_until"], "401 is not a rate limit")
+
+    def test_rate_limit_headers_are_read_regardless_of_case(self):
+        """HTTP/2 puts header names on the wire in lower case. Production hides
+        that behind a case-insensitive HTTPMessage; a test double must not be
+        the only reason the lookup works."""
+        reset = int(time.time()) + 300
+        exhausted = HttpError(429, "too many", "", headers={
+            "x-ratelimit-remaining": "0", "x-ratelimit-reset": str(reset)})
+
+        with self.assertRaises(HttpError):
+            self.labissues.sweep(fetch=fake(raises=exhausted))
+
+        self.assertEqual(self.labissues.snapshot()["backoff_until"], float(reset))
 
     def test_a_malformed_payload_degrades_without_crashing_the_sweep(self):
         """GitHub answering 200 with something that is not a list of issues —
@@ -124,7 +147,7 @@ class SweepTest(unittest.TestCase):
         self.labissues.sweep(fetch=fake(304, None, {"ETag": 'W/"abc"'}))
         after = self.labissues.snapshot()
 
-        self.assertGreaterEqual(after["checked"], first["checked"])
+        self.assertGreater(after["checked"], first["checked"], "a 304 did not count as a check")
         self.assertEqual(after["changed"], first["changed"], "a 304 is not a change")
 
     def test_only_the_fields_the_app_needs_are_kept(self):
@@ -143,6 +166,38 @@ class SweepTest(unittest.TestCase):
         self.assertEqual(kept["labels"], ["claudeos:triaged"], "labels should be plain names")
         for noise in ("reactions", "user", "timeline_url"):
             self.assertNotIn(noise, kept)
+
+
+class UnusableConfigTest(unittest.TestCase):
+    """The default path, where sweep resolves its own config. A sweep that
+    cannot even build a request must fail *quietly and visibly*: quietly
+    because the sweeper would otherwise log the same line every 60s forever,
+    visibly because the UI has to say why nothing is being fetched."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["CLAUDEOS_DATA"] = self.tmp
+        self.store = importlib.reload(_store)
+        self.labissues = importlib.reload(_labissues)
+
+    def tearDown(self):
+        os.environ.pop("CLAUDEOS_DATA", None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        importlib.reload(_store)
+
+    def test_an_unconfigured_install_does_not_raise(self):
+        self.labissues.sweep()
+        self.assertIn("not configured", self.labissues.snapshot()["error"])
+
+    def test_a_repo_pasted_as_a_url_does_not_raise_either(self):
+        """Pasting the browser URL instead of owner/name is the obvious
+        mistake, and it must not become a per-minute ops-log line."""
+        self.store.save_system(
+            "labissues", {"repo": "https://github.com/xpenno255/homelab", "token": "x"})
+
+        self.labissues.sweep()
+
+        self.assertIn("owner/name", self.labissues.snapshot()["error"])
 
 
 if __name__ == "__main__":
