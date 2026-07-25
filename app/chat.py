@@ -1,50 +1,40 @@
-"""Agentic ops chat — the loop, the conversation store, cost accounting.
+"""Agentic ops chat — streaming, write approval, the conversation store.
 
 Implements §2–§4, §8, §10, §12, §13 of docs/spec-agentic-ops-chat.md.
 
-A manual tool-use loop on the anthropic SDK (the tool runner can't suspend
-across HTTP requests, which mandatory write-confirmation requires). Each turn
-is driven as a generator of events; server.py serialises those to SSE.
+The tool-use loop itself lives in app/toolloop.py, shared with the headless
+callers that drive the same core. What stays here is everything specific to a
+human sitting in front of a browser: the SSE event stream, the write-approval
+boundary, conversation persistence and per-turn cost accounting.
 
-The write-approval boundary is what shapes this module: on `approval_required`
-the loop persists the messages list plus a single-use pending record, emits
-`approval_required`, and returns. A later POST to the approve route resumes
-from that persisted state with the tool_result filled in.
+That approval boundary is what shapes this module: on `approval_required` the
+loop's hook persists the messages list plus a single-use pending record, the
+event reaches the browser, and the run suspends. A later POST to the approve
+route resumes the loop from that persisted state with the tool_result filled in.
 """
 
-import datetime
 import json
 import os
 import secrets
 import threading
 import time
 
-from . import notify, oplog, store, tools
+from . import notify, oplog, toolloop, tools
 from .store import DATA_DIR
 
-try:
-    import anthropic
-    HAS_SDK = True
-except ImportError:  # plain system python — chat is unavailable
-    anthropic = None
-    HAS_SDK = False
+# Re-exported for server.py and the Setup page: chat is unavailable without the
+# SDK, exactly as the loop is.
+HAS_SDK = toolloop.HAS_SDK
 
 PATH = os.path.join(DATA_DIR, "chats.json")
 
-MODEL = "claude-sonnet-5"
-EFFORT = "medium"              # low | medium | high | xhigh | max
-MAX_TOKENS = 16000             # caps thinking + text together
-MAX_ITERATIONS = 15            # tools withheld on the final one
+MODEL = toolloop.MODEL
 KEEP_CONVERSATIONS = 20
-CONTEXT_BUDGET = 120_000       # input tokens; turn refused past CONTEXT_FULL_AT
-CONTEXT_FULL_AT = 0.8
+# The loop stops a turn that reaches CONTEXT_FULL_AT of the budget; these are
+# re-exported so the turn-entry refusal and the UI gauge use the same numbers.
+CONTEXT_BUDGET = toolloop.CONTEXT_BUDGET
+CONTEXT_FULL_AT = toolloop.CONTEXT_FULL_AT
 APPROVAL_TTL = 30 * 60         # seconds
-API_TIMEOUT = 600
-
-# Sonnet 5 list price is $3/$15 per MTok, with introductory $2/$10 running to
-# 2026-08-31. Cache writes bill 1.25x input, reads 0.1x.
-_INTRO_UNTIL = datetime.date(2026, 8, 31)
-_PRICES = {"intro": (2.0, 10.0), "list": (3.0, 15.0)}
 
 SYSTEM_PROMPT = """You are the ops assistant inside ClaudeOS, a homelab mission-control app. You answer questions about this specific homelab using the tools provided, and you can make changes when the user approves them.
 
@@ -146,186 +136,49 @@ def _new_conversation(first_message: str) -> dict:
             "pending": None}
 
 
-# --------------------------------------------------------------- pricing
+# -------------------------------------------------------------- the turn
 
-def _rate() -> tuple:
-    return _PRICES["intro" if datetime.date.today() <= _INTRO_UNTIL else "list"]
+def _drive(conv: dict, client, resume_results: list | None = None):
+    """Run the shared loop over this conversation, yielding its events.
 
-
-def _cost(usage) -> float:
-    inp, out = _rate()
-    fresh = getattr(usage, "input_tokens", 0) or 0
-    cw = getattr(usage, "cache_creation_input_tokens", 0) or 0
-    cr = getattr(usage, "cache_read_input_tokens", 0) or 0
-    otok = getattr(usage, "output_tokens", 0) or 0
-    return ((fresh + cw * 1.25 + cr * 0.1) * inp + otok * out) / 1_000_000
-
-
-def _prompt_tokens(usage) -> int:
-    """Total prompt size — the uncached remainder plus both cache tiers."""
-    return ((getattr(usage, "input_tokens", 0) or 0)
-            + (getattr(usage, "cache_creation_input_tokens", 0) or 0)
-            + (getattr(usage, "cache_read_input_tokens", 0) or 0))
-
-
-# ------------------------------------------------------------------ client
-
-def require_sdk() -> None:
-    if not HAS_SDK:
-        raise LookupError(
-            "chat needs the anthropic SDK — start ClaudeOS with .venv/bin/python3 "
-            "server.py (the AI analysis features work either way)")
-
-
-def _client():
-    require_sdk()
-    s = store.get_system("ai", reveal_secrets=True)
-    if not s or not s.get("api_key"):
-        raise LookupError("chat needs an Anthropic API key — add it on the Setup page")
-    return anthropic.Anthropic(api_key=s["api_key"], timeout=API_TIMEOUT)
-
-
-def _system_blocks():
-    # One cache breakpoint after tools+system (they render in that order), so
-    # the stable prefix is reused every iteration and every turn.
-    return [{"type": "text", "text": SYSTEM_PROMPT,
-             "cache_control": {"type": "ephemeral"}}]
-
-
-def _blocks(reply) -> list:
-    """SDK content blocks → plain wire-format dicts.
-
-    The conversation is persisted as JSON, and the SDK's block objects are not
-    JSON-serialisable. Dumping to plain dicts keeps the messages list both
-    storable and valid to send straight back — which matters for thinking
-    blocks, which must be echoed back unchanged (their text is empty on Sonnet
-    5, where `display` defaults to omitted, but the block itself is load-bearing).
-    """
-    out = []
-    for b in reply.content:
-        if hasattr(b, "model_dump"):
-            out.append(b.model_dump(mode="json", exclude_none=True))
-        else:
-            out.append(b)
-    return out
-
-
-def _tool_result(tool_use_id: str, env: dict) -> dict:
-    """Render an envelope as a tool_result block. Errors set is_error so the
-    model can react rather than treating the failure as data."""
-    payload = {k: v for k, v in env.items() if k != "params" and v is not None}
-    block = {"type": "tool_result", "tool_use_id": tool_use_id,
-             "content": json.dumps(payload, default=str)[:60_000]}
-    if env["status"] == "error":
-        block["is_error"] = True
-    return block
-
-
-# -------------------------------------------------------------- the loop
-
-def _iterate(client, conv: dict, resume_results: list | None = None):
-    """Drive the tool loop, yielding (event, payload) pairs.
-
-    Suspends by returning after an `approval_required` event; the conversation
-    (already persisted with its pending record) resumes via run_approval.
+    The only thing layered on the loop here is the approval hook: it mints the
+    single-use pending id, records it on the conversation so `_finish` persists
+    it, and hands it back for the `approval_required` event the browser renders
+    as a confirmation card. The loop stops right after that event; run_approval
+    resumes from the persisted state.
     """
     messages = conv["messages"]
     if resume_results:
         messages.append({"role": "user", "content": resume_results})
 
-    turn_cost, turn_tools, usage_last = 0.0, 0, None
-    # Duplicate-call guard is per TURN, not per conversation: a follow-up
-    # "check again now" must be able to re-run the same query.
-    seen: set = set()
-
-    for step in range(MAX_ITERATIONS):
-        last_step = step == MAX_ITERATIONS - 1
-        kwargs = {
-            "model": MODEL,
-            "max_tokens": MAX_TOKENS,
-            "system": _system_blocks(),
-            "messages": messages,
-            "thinking": {"type": "adaptive"},
-            "output_config": {"effort": EFFORT},
+    def approval(name, params, tool_use_id, env, other_results):
+        pid = secrets.token_hex(8)
+        env["pending_id"] = pid
+        pending = {
+            "id": pid, "tool": name, "params": params,
+            "tool_use_id": tool_use_id, "expires": time.time() + APPROVAL_TTL,
+            "warning": env.get("warning"),
+            "other_results": other_results,   # sibling calls already resolved
         }
-        # Tools are withheld on the final iteration so the turn ends in prose
-        # rather than a tool call we would have to refuse.
-        if not last_step:
-            kwargs["tools"] = tools.schemas()
+        oplog.add("info", "chat", f"approval requested: {env['invocation']}")
+        conv["pending"] = pending
+        return pending
 
-        try:
-            with client.messages.stream(**kwargs) as stream:
-                for event in stream:
-                    if (event.type == "content_block_delta"
-                            and getattr(event.delta, "type", None) == "text_delta"):
-                        yield "token", {"text": event.delta.text}
-                reply = stream.get_final_message()
-        except Exception as e:  # noqa: BLE001 — surface API failures to the UI
-            yield "error", {"message": f"{type(e).__name__}: {e}"}
-            return
-
-        usage_last = reply.usage
-        turn_cost += _cost(reply.usage)
-        messages.append({"role": "assistant", "content": _blocks(reply)})
-
-        if reply.stop_reason == "refusal":
-            yield "error", {"message": "Claude declined to answer this request."}
-            break
-        if reply.stop_reason != "tool_use":
-            if reply.stop_reason == "max_tokens":
-                yield "error", {"message": "the reply hit the token cap and was cut short"}
-            break
-
-        calls = [b for b in reply.content if b.type == "tool_use"]
-        results, pending = [], None
-
-        for call in calls:
-            params = dict(call.input or {})
-            key = (call.name, json.dumps(params, sort_keys=True))
-            turn_tools += 1
-            yield "tool_start", {"name": call.name, "invocation": f"{call.name}(…)"}
-
-            if key in seen:
-                env = tools.envelope(
-                    "error", invocation=f"{call.name}(…)", params=params,
-                    error="you already ran this exact call on this turn — vary the "
-                          "parameters or use the result you already have")
-            else:
-                seen.add(key)
-                env = tools.run(call.name, params)
-
-            if env["status"] == "approval_required":
-                pid = secrets.token_hex(8)
-                env["pending_id"] = pid
-                pending = {
-                    "id": pid, "tool": call.name, "params": params,
-                    "tool_use_id": call.id, "expires": time.time() + APPROVAL_TTL,
-                    "warning": env.get("warning"),
-                    "other_results": results,   # sibling calls already resolved
-                }
-                oplog.add("info", "chat",
-                          f"approval requested: {env['invocation']}")
-                yield "tool_result", {"name": call.name, "envelope": env}
-                yield "approval_required", {"pending": pending, "envelope": env}
-                break
-
-            results.append(_tool_result(call.id, env))
-            yield "tool_result", {"name": call.name, "envelope": env}
-
-        if pending:
-            conv["pending"] = pending
-            yield "_suspend", {"cost": turn_cost, "tools": turn_tools, "usage": usage_last}
-            return
-
-        messages.append({"role": "user", "content": results})
-
-    yield "_done", {"cost": turn_cost, "tools": turn_tools, "usage": usage_last}
+    # Writes included: this is the one caller with a human to approve them.
+    return toolloop.run(client, messages, schemas=tools.schemas(),
+                        system=toolloop.system_blocks(SYSTEM_PROMPT),
+                        approval=approval)
 
 
 def _finish(conv: dict, payload: dict, *, suspended: bool):
-    """Record turn accounting and persist. Returns the cost event payload."""
+    """Record turn accounting and persist. Returns the cost event payload.
+
+    Runs on every ending the loop has, error paths included — a turn that failed
+    part-way through still spent money, and dropping that would understate the
+    conversation's cost.
+    """
     usage = payload.get("usage")
-    prompt_tokens = _prompt_tokens(usage) if usage else 0
+    prompt_tokens = toolloop.prompt_tokens(usage) if usage else 0
     conv["turns"].append({
         "ts": time.time(), "cost_usd": round(payload.get("cost", 0.0), 6),
         "tools": payload.get("tools", 0), "prompt_tokens": prompt_tokens,
@@ -359,7 +212,7 @@ def _release(cid: str) -> None:
 
 def run_turn(message: str, conversation_id: str | None = None):
     """Generator of (event, payload) for a new user message."""
-    client = _client()
+    client = toolloop.new_client()
     conv = get_conversation(conversation_id) if conversation_id else _new_conversation(message)
 
     if conv.get("pending"):
@@ -372,9 +225,9 @@ def run_turn(message: str, conversation_id: str | None = None):
     try:
         yield "conversation", {"id": conv["id"], "title": conv["title"]}
         conv["messages"].append({"role": "user", "content": message})
-        for event, payload in _iterate(client, conv):
-            if event in ("_done", "_suspend"):
-                yield "cost", _finish(conv, payload, suspended=event == "_suspend")
+        for event, payload in _drive(conv, client):
+            if event in ("finished", "suspended"):
+                yield "cost", _finish(conv, payload, suspended=event == "suspended")
                 return
             yield event, payload
     finally:
@@ -383,7 +236,7 @@ def run_turn(message: str, conversation_id: str | None = None):
 
 def run_approval(cid: str, pending_id: str, decision: str, guidance: str = ""):
     """Generator of (event, payload) resuming a suspended turn."""
-    client = _client()
+    client = toolloop.new_client()
     conv = get_conversation(cid)
     pending = conv.get("pending")
     if not pending:
@@ -412,7 +265,7 @@ def run_approval(cid: str, pending_id: str, decision: str, guidance: str = ""):
                 notify.send("ClaudeOS chat made a change", label,
                             priority="default", tags=["wrench"])
             yield "tool_result", {"name": pending["tool"], "envelope": env}
-            result_block = _tool_result(pending["tool_use_id"], env)
+            result_block = toolloop.tool_result(pending["tool_use_id"], env)
         else:
             text = (f"The user denied this action. Their guidance: {guidance}"
                     if guidance.strip() else
@@ -426,9 +279,9 @@ def run_approval(cid: str, pending_id: str, decision: str, guidance: str = ""):
                             "content": text, "is_error": True}
 
         results = list(pending.get("other_results") or []) + [result_block]
-        for event, payload in _iterate(client, conv, resume_results=results):
-            if event in ("_done", "_suspend"):
-                yield "cost", _finish(conv, payload, suspended=event == "_suspend")
+        for event, payload in _drive(conv, client, resume_results=results):
+            if event in ("finished", "suspended"):
+                yield "cost", _finish(conv, payload, suspended=event == "suspended")
                 return
             yield event, payload
     finally:
