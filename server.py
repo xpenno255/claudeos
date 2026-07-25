@@ -392,7 +392,7 @@ ROUTES = [
     ("DELETE", r"^/api/systems/(?P<id>[a-z]+)$",                          route_system_delete),
     ("POST",   r"^/api/systems/(?P<id>[a-z]+)/test$",                     route_system_test),
     ("POST",   r"^/api/poll$",                                            route_poll_now),
-    ("GET",    r"^/api/lab/issues$",                                      route_lab_issues),
+    ("GET",    r"^/api/labissues$"   ,                                      route_lab_issues),
     ("GET",    r"^/api/unifi/devices$",                                   route_unifi_devices),
     ("GET",    r"^/api/unifi/clients$",                                   route_unifi_clients),
     ("GET",    r"^/api/unifi/insights$",                                  route_unifi_insights),
