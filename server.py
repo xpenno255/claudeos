@@ -104,6 +104,10 @@ def route_system_test(_m, p, _b):
     return result
 
 
+def route_lab_issues(_m, _p, _b):
+    return labissues.snapshot()
+
+
 def route_poll_now(_m, _p, _b):
     poller.poll_once()
     return {"ok": True, "systems": poller.snapshot()}
@@ -388,6 +392,7 @@ ROUTES = [
     ("DELETE", r"^/api/systems/(?P<id>[a-z]+)$",                          route_system_delete),
     ("POST",   r"^/api/systems/(?P<id>[a-z]+)/test$",                     route_system_test),
     ("POST",   r"^/api/poll$",                                            route_poll_now),
+    ("GET",    r"^/api/lab/issues$",                                      route_lab_issues),
     ("GET",    r"^/api/unifi/devices$",                                   route_unifi_devices),
     ("GET",    r"^/api/unifi/clients$",                                   route_unifi_clients),
     ("GET",    r"^/api/unifi/insights$",                                  route_unifi_insights),
@@ -609,6 +614,7 @@ def main():
     reports.start()
     smart.start()
     registry.start()
+    labissues.start()
     chat.start()   # invalidates any pending write-approval left by a restart
     oplog.add("info", "claudeos", f"server started on {args.host}:{args.port}")
     srv = ThreadingHTTPServer((args.host, args.port), Handler)

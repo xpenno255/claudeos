@@ -6,8 +6,9 @@ owns every call ClaudeOS makes to that repo. It is deliberately **not** a
 connector (ADR-0001): nothing here is polled, and GitHub being briefly
 unreachable is not a lab incident.
 
-Today it owns exactly the credential read plus the Setup-page connection
-test. The sweep loop, ETag cache and triage arrive in later tickets.
+Today it owns the credential read, the Setup-page connection test, and the
+ETag-conditional sweep that keeps a local picture of the repo's open issues.
+Triage arrives in a later ticket.
 
 Two deviations from the rest of the app's outbound HTTP:
 
@@ -22,12 +23,16 @@ Two deviations from the rest of the app's outbound HTTP:
 """
 
 import re
+import threading
+import time
 
-from . import store
+from . import oplog, store, sweeper
 from .httpclient import HttpError, request
 
 API_BASE = "https://api.github.com"
 API_VERSION = "2022-11-28"  # pinned: GitHub versions its REST API by date
+SWEEP_INTERVAL = 60         # a conditional 304 is free, so this costs ~2.4%/hr
+PAGE_SIZE = 100             # GitHub's maximum
 TIMEOUT = 15
 
 # owner/name, GitHub's own character set for both halves
@@ -140,3 +145,170 @@ def test() -> dict:
     return {"ok": True,
             "detail": f"{full} reachable ({visibility}) — issues readable, {backlog}; "
                       f"{remaining} API requests left this hour"}
+
+
+# ------------------------------------------------------------------ the sweep
+
+_lock = threading.Lock()
+_cache: dict = {"issues": [], "etag": None, "checked": None, "changed": None,
+                "error": None, "backoff_until": None}
+
+
+def snapshot() -> dict:
+    """The current picture of the lab repo's open issues."""
+    with _lock:
+        return dict(_cache)
+
+
+def _project(issue: dict) -> dict:
+    """A GitHub issue reduced to what ClaudeOS actually uses.
+
+    The wire object carries reactions, the author's avatar, half a dozen URLs
+    and a timeline link; none of it reaches the queue view or the triage run,
+    and all of it would sit in memory and cross the API on every poll.
+    """
+    return {
+        "number": issue.get("number"),
+        "title": issue.get("title"),
+        "state": issue.get("state"),
+        "body": issue.get("body"),
+        "labels": [l.get("name") for l in (issue.get("labels") or [])
+                   if isinstance(l, dict) and l.get("name")],
+        "comments": issue.get("comments"),
+        "created_at": issue.get("created_at"),
+        "updated_at": issue.get("updated_at"),
+        "html_url": issue.get("html_url"),
+    }
+
+
+def _backoff_until(e: HttpError) -> float | None:
+    """When GitHub says to stop asking, until when.
+
+    `retry-after` (seconds) wins where present — the docs put it first, and it
+    is what secondary rate limits use. Otherwise a primary limit is in force
+    only when `x-ratelimit-remaining` is exactly 0, and `x-ratelimit-reset` is
+    an absolute UTC epoch, not a delta.
+    """
+    hdrs = e.headers
+    if hdrs is None or e.status not in (403, 429):
+        return None
+    retry_after = (hdrs.get("Retry-After") or "").strip()
+    if retry_after.isdigit():
+        return time.time() + int(retry_after)
+    if (hdrs.get("X-RateLimit-Remaining") or "").strip() == "0":
+        reset = (hdrs.get("X-RateLimit-Reset") or "").strip()
+        if reset.isdigit():
+            return float(reset)
+    return None
+
+
+def sweep(fetch=None) -> dict:
+    """Refresh the cache once. Returns the resulting snapshot.
+
+    `fetch(etag) -> (status, payload, headers)` is the seam: the default
+    resolves the repo and token from the encrypted store and calls GitHub,
+    while a caller passing its own bypasses configuration entirely.
+    """
+    if fetch is None:
+        try:
+            repo, token = settings()
+        except LookupError as e:
+            # Not configured yet. Record it and return quietly rather than
+            # raising: the sweeper would otherwise write the same ops-log line
+            # every SWEEP_INTERVAL on an install that has simply not set this
+            # up. Not covered by a test — the seam bypasses config entirely.
+            with _lock:
+                _cache["error"] = str(e)
+            return snapshot()
+
+        def fetch(etag):  # noqa: E306 — the default, bound to this run's config
+            return _list_issues(repo, token, etag)
+
+    with _lock:
+        etag = _cache["etag"]
+        held_off = _cache["backoff_until"] and time.time() < _cache["backoff_until"]
+    if held_off:
+        # Deliberately silent and deliberately not an error: we are waiting on
+        # purpose, and the reason is already in _cache["error"].
+        return snapshot()
+
+    try:
+        status, payload, headers = fetch(etag)
+    except HttpError as e:
+        until = _backoff_until(e)
+        with _lock:
+            _cache["error"] = str(e)
+            if until:
+                _cache["backoff_until"] = until
+                _cache["error"] = (f"GitHub rate limit reached — not asking again until "
+                                   f"unix {int(until)}")
+        raise
+    except Exception as e:
+        # Record it where the UI can see it, then re-raise so the sweeper
+        # thread's own handler puts it in the ops log. What must NOT happen is
+        # the cache being cleared: a failed sweep means the issue state is
+        # unknown, which is a different thing from there being no issues.
+        with _lock:
+            _cache["error"] = str(e)
+        raise
+
+    if status != 304 and not isinstance(payload, list):
+        # A 200 whose body is not a list is GitHub telling us something we did
+        # not ask about — an error object, a truncated read. Refuse it rather
+        # than caching it as "the issues".
+        problem = f"unexpected response from GitHub: {type(payload).__name__}, expected a list"
+        with _lock:
+            _cache["error"] = problem
+        raise ValueError(problem)
+
+    now = time.time()
+    with _lock:
+        # 304 means "your copy is current" — the body is empty, so the issues
+        # we already hold ARE the answer. Overwriting them here would turn a
+        # free, successful sweep into an apparently empty repo.
+        if status != 304:
+            # The issues endpoint returns pull requests as well — they are the
+            # ones carrying a pull_request key. A PR is not a lab issue.
+            _cache["issues"] = [_project(i) for i in payload
+                                if isinstance(i, dict) and "pull_request" not in i]
+            _cache["etag"] = (headers or {}).get("ETag") or _cache["etag"]
+            _cache["changed"] = now
+        # Bumped on a 304 too: the answer was confirmed current, which is what
+        # "last checked" means. "changed" deliberately does not move — the two
+        # are different questions and the UI asks both.
+        _cache["checked"] = now
+        _cache["error"] = None
+        _cache["backoff_until"] = None
+    return snapshot()
+
+
+def _list_issues(repo: str, token: str, etag: str | None):
+    """One conditional GET of the repo's open issues.
+
+    Returns `(status, payload, headers)`. A 304 arrives from `httpclient` as an
+    `HttpError` because it raises on anything outside 2xx — here it is the
+    success case, and the cheap one: it does not count against the rate limit.
+    """
+    headers = _headers(token)
+    if etag:
+        headers["If-None-Match"] = etag
+    path = f"/repos/{repo}/issues?state=open&per_page={PAGE_SIZE}"
+    try:
+        payload, hdrs = request("GET", API_BASE + path, headers=headers, verify_tls=True,
+                                timeout=TIMEOUT, return_headers=True)
+    except HttpError as e:
+        if e.status == 304:
+            return 304, None, e.headers
+        raise
+    # Pagination is not followed: a lab repo with more than 100 open incidents
+    # has a bigger problem than this sweep. Say so rather than silently
+    # truncating the backlog.
+    if 'rel="next"' in (hdrs.get("Link") or ""):
+        oplog.add("warn", "labissues",
+                  f"more than {PAGE_SIZE} open lab issues — only the first page is shown")
+    return 200, payload, hdrs
+
+
+def start() -> None:
+    sweeper.spawn("labissues", sweep, SWEEP_INTERVAL,
+                  system="labissues", error="lab issues sweep failed")
