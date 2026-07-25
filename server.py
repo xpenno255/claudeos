@@ -105,7 +105,21 @@ def route_system_test(_m, p, _b):
 
 
 def route_lab_issues(_m, _p, _b):
-    return labissues.snapshot()
+    # triage_available rides along so the UI can state the precondition up front
+    # rather than offering a control that answers 404.
+    return {**labissues.snapshot(), "triage_available": labissues.HAS_SDK,
+            "triage_label": labissues.TRIAGED_LABEL, "model": labissues.MODEL}
+
+
+def route_lab_triage(_m, p, _b):
+    """Triage one lab issue, on demand.
+
+    Synchronous, like the weekly report's run-now: a run takes minutes, and the
+    caller is a human who asked for this one issue. labissues.triage reports a
+    failed run rather than raising it — the issue is marked either way — so a
+    non-2xx here means it never started (no SDK, no credentials, no such issue).
+    """
+    return labissues.triage(p["number"])
 
 
 def route_poll_now(_m, _p, _b):
@@ -393,6 +407,7 @@ ROUTES = [
     ("POST",   r"^/api/systems/(?P<id>[a-z]+)/test$",                     route_system_test),
     ("POST",   r"^/api/poll$",                                            route_poll_now),
     ("GET",    r"^/api/lab/issues$",                                      route_lab_issues),
+    ("POST",   r"^/api/lab/issues/(?P<number>\d+)/triage$",               route_lab_triage),
     ("GET",    r"^/api/unifi/devices$",                                   route_unifi_devices),
     ("GET",    r"^/api/unifi/clients$",                                   route_unifi_clients),
     ("GET",    r"^/api/unifi/insights$",                                  route_unifi_insights),

@@ -183,6 +183,8 @@ POST /api/docker/containers/{id}/{start|stop|restart}
 GET  /api/ha/entities
 POST /api/ha/service          {"domain","service","entity_id","data"}
 GET  /api/synology/storage                             # volumes + disk SMART
+GET  /api/lab/issues                                   # lab issue queue + triage state
+POST /api/lab/issues/{number}/triage                   # triage one issue now
 ```
 
 Example: *"restart the plex container"* →

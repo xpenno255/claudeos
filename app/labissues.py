@@ -6,9 +6,17 @@ owns every call ClaudeOS makes to that repo. It is deliberately **not** a
 connector (ADR-0001): nothing here is polled, and GitHub being briefly
 unreachable is not a lab incident.
 
-Today it owns the credential read, the Setup-page connection test, and the
-ETag-conditional sweep that keeps a local picture of the repo's open issues.
-Triage arrives in a later ticket.
+It owns the credential read, the Setup-page connection test, the
+ETag-conditional sweep that keeps a local picture of the repo's open issues, and
+the triage run: an agentic pass over one issue with read-only access to the lab,
+whose verdict is posted back as a comment.
+
+Its public entry points take their dependencies as arguments — `sweep(fetch=…)`,
+`triage(number, analyse=…, comment=…, label=…)`. That is a departure from the
+prevailing style in this codebase and it is the point: the failure modes here
+(re-triage loops, an unmarked failure, a verdict that will not parse back) are
+silent and expensive, so they are tested at this interface with no network, no
+Anthropic call and no credentials.
 
 Two deviations from the rest of the app's outbound HTTP:
 
@@ -22,11 +30,12 @@ Two deviations from the rest of the app's outbound HTTP:
   in words.
 """
 
+import json
 import re
 import threading
 import time
 
-from . import oplog, store, sweeper
+from . import oplog, store, sweeper, toolloop, tools
 from .httpclient import HttpError, request
 
 API_BASE = "https://api.github.com"
@@ -40,6 +49,32 @@ REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 
 PAT_HINT = ("Repository access → Only select repositories, "
             "Permissions → Issues: Read and write")
+
+# Triage needs the agentic loop, which needs the SDK. Re-exported so the route
+# and the UI can state the precondition instead of discovering it as a failure.
+HAS_SDK = toolloop.HAS_SDK
+MODEL = toolloop.MODEL
+
+TRIAGED_LABEL = "claudeos:triaged"
+MARKER = "claudeos-triage"
+BLOCK_VERSION = 1
+# Lower than chat's 15: a triage run is unattended, so nobody is watching the
+# spend. The daily ledger that bounds it across runs is a separate concern.
+TRIAGE_ITERATIONS = 10
+
+# Closed vocabularies. Four verdicts because a refuted hypothesis is a useful
+# result rather than a failure, and "looked, found nothing" is not the same
+# answer as "could not tell". A status per finding because one real run mixed
+# success, no_data and truncated, and a single figure at the top would have
+# hidden that a key field came back empty. `excluded` names evidence
+# deliberately not used, with its reason.
+VERDICTS = ("diagnosed", "refuted", "inconclusive", "no_fault_found")
+CONFIDENCES = ("low", "medium", "high")
+SEVERITIES = ("critical", "serious", "warning", "info")
+EVIDENCE_STATUSES = ("success", "no_data", "truncated", "excluded")
+# A kind, because the honest output of a real run was a diagnostic and not a
+# repair — a shape that assumes a fix will have one manufactured for it.
+REMEDIATION_KINDS = ("fix", "diagnostic", "none")
 
 
 def _hdr(hdrs, name: str) -> str:
@@ -94,6 +129,17 @@ def _get(path: str, token: str, *, return_headers: bool = False):
     """GET an api.github.com path with TLS verification ON."""
     return request("GET", API_BASE + path, headers=_headers(token),
                    verify_tls=True, timeout=TIMEOUT, return_headers=return_headers)
+
+
+def _post(path: str, token: str, body: dict):
+    """POST to an api.github.com path — a write against the *tracker*.
+
+    Distinct from the lab being read-only during triage: commenting and
+    labelling are the two writes this feature makes, and they touch GitHub, not
+    the homelab (CONTEXT.md, "read-only").
+    """
+    return request("POST", API_BASE + path, headers=_headers(token), json_body=body,
+                   verify_tls=True, timeout=TIMEOUT)
 
 
 def _explain(e: HttpError, repo: str) -> Exception:
@@ -327,6 +373,359 @@ def _list_issues(repo: str, token: str, etag: str | None):
         oplog.add("warn", "labissues",
                   f"more than {PAGE_SIZE} open lab issues — only the first page is shown")
     return 200, payload, hdrs
+
+
+# ----------------------------------------------------------------- the verdict
+
+TRIAGE_TAIL = """## Your job
+
+You are triaging one issue from this homelab's issue tracker, raised by the person who owns the lab. You are working unattended: there is nobody to ask a question of, and nothing you say reaches them until you finish.
+
+Work out what is actually wrong. Form hypotheses, then use the tools to test them against the lab's real state. Name the hypotheses you rule out — a hypothesis you can eliminate is a useful result, not a failure, and it saves the owner from checking it themselves.
+
+Your tools are read-only. You cannot change anything, restart anything or apply a fix, and you must not claim to have done so. Nor can you ask for permission: if the only way forward is a change, the honest answer is a diagnostic — the exact next step for a human to take.
+
+Stop when the evidence stops paying for itself. An issue you cannot settle is a real outcome; say what you checked, what you found, and what would settle it.
+
+## Your answer
+
+Your final answer is a structured record. The fields:
+
+- `summary` — the comment a human reads on the issue. Markdown prose, addressed to the lab's owner. Lead with the answer, then the evidence for it, then what to do next. Quote what you actually saw. Hedge anything you did not directly confirm, and say plainly which areas went unverified and why.
+- `verdict` — `diagnosed` when you have identified the cause. `refuted` when the issue's own stated cause is wrong, whether or not you found the real one. `no_fault_found` when you looked where the issue points and everything there is healthy. `inconclusive` when you could not tell.
+- `confidence` — in the verdict, not in the lab.
+- `severity` — the impact on the home if this is left alone, not how interesting it is.
+- `refuted` — each hypothesis you ruled out, named in a short phrase.
+- `evidence` — one entry per finding that carries weight, with the tool it came from and that result's own status: `success`, `no_data` (the query worked and found nothing — never report this as healthy), `truncated` (you saw part of it), or `excluded` for something you looked at and deliberately did not rely on, with the reason in the note.
+- `remediation` — `kind` is `fix` for a change that resolves it, `diagnostic` for the next step that would narrow it down, `none` when there is nothing to do. `text` is what a human should actually do, specific enough to follow. ClaudeOS never runs it; a person reads it and decides."""
+
+TRIAGE_PROMPT = f"{toolloop.BASE_PROMPT}\n\n{TRIAGE_TAIL}"
+
+# The shape asked of the model. Deliberately not the same shape as the machine
+# block: `summary` is prose for the comment and never goes in the block, and
+# `executable` is absent because ClaudeOS stamps it — the model does not get to
+# say whether this app will run something.
+VERDICT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["summary", "verdict", "confidence", "severity", "refuted",
+                 "evidence", "remediation"],
+    "properties": {
+        "summary": {"type": "string",
+                    "description": "Markdown prose for the lab's owner, posted as the "
+                                   "issue comment. Answer first, then the evidence."},
+        "verdict": {"type": "string", "enum": list(VERDICTS)},
+        "confidence": {"type": "string", "enum": list(CONFIDENCES)},
+        "severity": {"type": "string", "enum": list(SEVERITIES)},
+        "refuted": {"type": "array", "items": {"type": "string"},
+                    "description": "Each hypothesis ruled out, as a short named phrase."},
+        "evidence": {
+            "type": "array",
+            "description": "One entry per finding that carries weight.",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["tool", "status", "note"],
+                "properties": {
+                    "tool": {"type": "string",
+                             "description": "The tool this finding came from."},
+                    "status": {"type": "string", "enum": list(EVIDENCE_STATUSES)},
+                    "note": {"type": "string",
+                             "description": "What it showed. For `excluded`, why it "
+                                            "was not relied on."},
+                },
+            },
+        },
+        "remediation": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["kind", "text"],
+            "properties": {
+                "kind": {"type": "string", "enum": list(REMEDIATION_KINDS)},
+                "text": {"type": "string",
+                         "description": "What a human should do. Empty when kind is "
+                                        "`none`."},
+            },
+        },
+    },
+}
+
+_BLOCK_RE = re.compile(r"<!--\s*" + re.escape(MARKER) + r"\s*(.*?)-->", re.DOTALL)
+
+
+class TriageFailed(Exception):
+    """A run that died part-way, carrying what it had already spent.
+
+    The spend rides along because it happened: an error that discards it
+    understates the cost of the feature, and a per-day ledger cannot be built on
+    numbers that only exist for runs that succeeded.
+    """
+
+    def __init__(self, message: str, spend: dict | None = None):
+        super().__init__(message)
+        self.spend = spend or _spend(None)
+
+
+def _spend(cost) -> dict:
+    c = cost if isinstance(cost, dict) else {}
+    return {"input": int(c.get("input") or 0),
+            "output": int(c.get("output") or 0),
+            "usd": round(float(c.get("usd") or 0.0), 6)}
+
+
+def _one_of(value, allowed: tuple, fallback: str) -> str:
+    return value if value in allowed else fallback
+
+
+def machine_block(result: dict | None, *, cost=None, error: str | None = None) -> dict:
+    """A verdict reduced to exactly the fields the hidden block carries.
+
+    Built field by field rather than passed through, because the vocabularies
+    are closed and the source is a language model: an invented verdict value or
+    an extra key would reach the UI that parses this. Anything unrecognised
+    lands on the cautious end — an unknown verdict is `inconclusive`, not a
+    diagnosis.
+
+    `executable` is stamped here, always false. The remediation is text and
+    ClaudeOS does not run it, so that is not the model's claim to make.
+    """
+    r = result if isinstance(result, dict) else {}
+    rem = r.get("remediation") if isinstance(r.get("remediation"), dict) else {}
+    block = {
+        "v": BLOCK_VERSION,
+        "verdict": _one_of(r.get("verdict"), VERDICTS, "inconclusive"),
+        "confidence": _one_of(r.get("confidence"), CONFIDENCES, "low"),
+        "severity": _one_of(r.get("severity"), SEVERITIES, "info"),
+        "refuted": [str(h).strip() for h in (r.get("refuted") or [])
+                    if str(h).strip()],
+        "evidence": [{"tool": str(e.get("tool") or "?"),
+                      "status": _one_of(e.get("status"), EVIDENCE_STATUSES, "excluded"),
+                      "note": str(e.get("note") or "")}
+                     for e in (r.get("evidence") or []) if isinstance(e, dict)],
+        "remediation": {"kind": _one_of(rem.get("kind"), REMEDIATION_KINDS, "none"),
+                        "text": str(rem.get("text") or ""),
+                        "executable": False},
+        "cost": _spend(cost),
+    }
+    if error:
+        # Only on the failure path. A block with an error and an `inconclusive`
+        # verdict is how a failed run explains itself to whatever reads it back.
+        block["error"] = str(error)
+    return block
+
+
+def comment_body(block: dict, prose: str) -> str:
+    """The comment as posted: prose a human reads, then a block they never see.
+
+    GitHub renders an HTML comment invisibly, so one comment serves both
+    readers. The escape matters — a note containing `-->` would otherwise close
+    the comment early and spill JSON onto the issue; as `\\u003e` it still
+    parses back to the same string.
+    """
+    payload = json.dumps(block, indent=1, sort_keys=True).replace("-->", "--\\u003e")
+    return f"{prose.strip()}\n\n<!-- {MARKER}\n{payload}\n-->\n"
+
+
+def parse_verdict(body: str | None) -> dict | None:
+    """The machine block in a comment, or None when there is not a usable one.
+
+    Degrades instead of raising. A comment with no block is the normal case —
+    humans write most of them — and a block that will not parse is a comment
+    from an older ClaudeOS or a truncated write. Either is a fact the caller can
+    render; neither should take down a sweep reading a whole issue's history.
+    """
+    m = _BLOCK_RE.search(body or "")
+    if not m:
+        return None
+    try:
+        block = json.loads(m.group(1))
+    except ValueError:
+        return None
+    if not isinstance(block, dict) or block.get("v") != BLOCK_VERSION:
+        return None
+    return block
+
+
+# --------------------------------------------------------------- the triage run
+
+def _issue_prompt(issue: dict) -> str:
+    labels = ", ".join(issue.get("labels") or []) or "none"
+    body = (issue.get("body") or "").strip() or "(the issue has no description)"
+    return (f"Triage this lab issue.\n\n"
+            f"Issue #{issue.get('number')}: {issue.get('title')}\n"
+            f"Opened: {issue.get('created_at')}\n"
+            f"Last updated: {issue.get('updated_at')}\n"
+            f"Labels: {labels}\n\n"
+            f"--- what the owner wrote ---\n{body}")
+
+
+def _analyse(issue: dict, client=None) -> tuple:
+    """Run the agentic pass over one issue. Returns (verdict, spend).
+
+    Read-only against the lab twice over: the schema list excludes the write
+    tools, so the model is never shown one, and no approval hook is passed, so
+    the loop refuses a write even if one somehow reached it.
+
+    Raises TriageFailed on every ending that is not a verdict — including the
+    loop's own error path — carrying the spend so the caller can still record it.
+    """
+    client = client or toolloop.new_client()
+    messages = [{"role": "user", "content": _issue_prompt(issue)}]
+    spend = _spend(None)
+
+    for event, payload in toolloop.run(
+            client, messages,
+            schemas=tools.schemas(include_writes=False),
+            system=toolloop.system_blocks(TRIAGE_PROMPT),
+            final_schema=VERDICT_SCHEMA,
+            max_iterations=TRIAGE_ITERATIONS):
+        if event not in ("finished", "suspended"):
+            continue
+        usage = payload.get("usage")
+        spend = _spend({
+            "input": toolloop.prompt_tokens(usage) if usage else 0,
+            "output": (getattr(usage, "output_tokens", 0) or 0) if usage else 0,
+            "usd": payload.get("cost") or 0.0,
+        })
+        if payload.get("error"):
+            raise TriageFailed(payload["error"], spend)
+        if event == "suspended":
+            raise TriageFailed("the run asked to make a change, which an unattended "
+                               "triage cannot approve", spend)
+        result = payload.get("structured")
+        if not isinstance(result, dict):
+            raise TriageFailed("the run ended without a verdict", spend)
+        return result, spend
+
+    raise TriageFailed("the run produced no result at all", spend)
+
+
+def _fetch_issue(repo: str, token: str, number: int) -> dict:
+    """One issue, fresh from GitHub rather than from the sweep cache.
+
+    The cache holds the first page of open issues as of the last sweep; triage
+    is worth one request to read the body as it stands now, and it works for an
+    issue the sweep never listed.
+    """
+    try:
+        issue = _get(f"/repos/{repo}/issues/{number}", token)
+    except HttpError as e:
+        if e.status == 404:
+            raise LookupError(
+                f"no issue #{number} in {repo} — it may have been deleted, or the "
+                f"token cannot see this repository") from e
+        raise _explain(e, repo) from e
+    if not isinstance(issue, dict) or not issue.get("number"):
+        raise ConnectionError(f"unexpected response from GitHub for issue #{number}")
+    if "pull_request" in issue:
+        raise ValueError(f"#{number} in {repo} is a pull request, not a lab issue")
+    return _project(issue)
+
+
+def _failure_prose(number: int, error: str) -> str:
+    return (f"**ClaudeOS could not finish triaging this issue.** The run failed: "
+            f"{error}\n\nThe `{TRIAGED_LABEL}` label has still been applied. That is "
+            f"deliberate: an unmarked failure would be picked up and paid for again "
+            f"on every sweep from now on. Remove the label to try again.")
+
+
+def triage(number, *, issue=None, analyse=None, comment=None, label=None,
+           client=None) -> dict:
+    """Triage one issue on demand: gather evidence, post the verdict, mark it done.
+
+    Every dependency is injectable, and the defaults are the real thing:
+
+      * `issue` — the issue dict (`_project` shape). Default: fetched from GitHub.
+      * `analyse(issue) -> (verdict, spend)` — the agentic run; raises
+        TriageFailed if it dies part-way. Default: `_analyse`.
+      * `comment(number, body)` — posts the comment. Default: GitHub.
+      * `label(number, names)` — applies the labels. Default: GitHub.
+      * `client` — the Anthropic client the default `analyse` drives. Passing one
+        exercises the real run, and its read-only guarantee, without an API key.
+
+    Returns what happened, including on the failure path: a run that dies is
+    still a completed triage as far as the tracker is concerned, so it reports
+    rather than raises. Exceptions are reserved for preconditions that stopped
+    it starting — no SDK, no credentials, no such issue.
+
+    **This does not decide whether the issue should be triaged.** It applies
+    `claudeos:triaged` when it finishes, but it never reads it: selecting what
+    to triage, and the concurrency and budget that bound a sweep, belong to the
+    caller.
+    """
+    if analyse is None and client is None and not HAS_SDK:
+        raise LookupError(
+            "triage needs the anthropic SDK — start ClaudeOS with .venv/bin/python3 "
+            "server.py (the issue sweep and the AI analysis features work either way)")
+    try:
+        number = int(number)
+    except (TypeError, ValueError):
+        raise ValueError(f"issue number must be a number — got {number!r}") from None
+    if number <= 0:
+        raise ValueError(f"issue number must be positive — got {number}")
+
+    repo = token = None
+    if issue is None or comment is None or label is None:
+        repo, token = settings()          # LookupError / ValueError if unusable
+    if issue is None:
+        issue = _fetch_issue(repo, token, number)
+    analyse = analyse or (lambda i: _analyse(i, client=client))
+    comment = comment or (lambda n, body: _post_comment(repo, token, n, body))
+    label = label or (lambda n, names: _add_labels(repo, token, n, names))
+
+    error = None
+    try:
+        result, spend = analyse(issue)
+    except TriageFailed as e:
+        result, spend, error = None, e.spend, str(e)
+    except Exception as e:  # noqa: BLE001 — any failure still has to mark the issue
+        result, spend, error = None, _spend(None), f"{type(e).__name__}: {e}"
+
+    block = machine_block(result, cost=spend, error=error)
+    prose = (_failure_prose(number, error) if error
+             else (str((result or {}).get("summary") or "").strip()
+                   or "(the run returned no summary)"))
+    body = comment_body(block, prose)
+
+    posted, unposted = None, None
+    try:
+        posted = comment(number, body)
+    except Exception as e:  # noqa: BLE001 — the marker matters more than the comment
+        unposted = f"{type(e).__name__}: {e}"
+        oplog.add("error", "labissues",
+                  f"triage #{number}: verdict could not be posted: {unposted}")
+
+    # Last, and unconditionally. The marker goes on even when the run failed and
+    # even when the comment did not post: an issue left unmarked is re-triaged,
+    # and paid for, on every sweep from then on — the retry storm recorded on the
+    # weekly report's last-run timestamp, which is written only on success.
+    label(number, [TRIAGED_LABEL])
+
+    oplog.add("warn" if error else "action", "labissues",
+              f"triage #{number}: {block['verdict']} "
+              f"({block['confidence']} confidence, {block['severity']}) "
+              f"${block['cost']['usd']:.4f}" + (f" — {error}" if error else ""))
+    return {"number": number, "title": issue.get("title"), "ok": error is None,
+            "verdict": block, "error": error, "unposted": unposted,
+            "labelled": True, "label": TRIAGED_LABEL,
+            "comment_url": posted.get("html_url") if isinstance(posted, dict) else None}
+
+
+def _post_comment(repo: str, token: str, number: int, body: str) -> dict:
+    try:
+        return _post(f"/repos/{repo}/issues/{number}/comments", token, {"body": body})
+    except HttpError as e:
+        raise _explain(e, repo) from e
+
+
+def _add_labels(repo: str, token: str, number: int, names: list) -> list:
+    """Apply labels to an issue. GitHub creates a label that does not exist yet,
+    so `claudeos:triaged` needs no setup step in the lab repo."""
+    try:
+        return _post(f"/repos/{repo}/issues/{number}/labels", token,
+                     {"labels": list(names)})
+    except HttpError as e:
+        raise _explain(e, repo) from e
 
 
 def start() -> None:
