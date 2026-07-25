@@ -76,6 +76,17 @@ const FORMS = [
     ],
   },
   {
+    id: "labissues",
+    title: "LAB ISSUES — GITHUB REPO",
+    note: "Where you raise homelab problems for ClaudeOS to triage: a dedicated PRIVATE GitHub repo, separate from this app's own development issues. Create a fine-grained access token (github.com → Settings → Developer settings → Personal access tokens → Fine-grained tokens) with Repository access set to ONLY this repo, and the single permission Issues: Read and write — Metadata: Read-only is added automatically by GitHub. Nothing else is needed. TLS verification is always on for GitHub.",
+    fields: [
+      { key: "repo", label: "LAB REPOSITORY", placeholder: "xpenno255/homelab",
+        hint: "owner/name only — no https:// and no .git" },
+      { key: "token", label: "GITHUB ACCESS TOKEN — ISSUES: READ AND WRITE", secret: true,
+        hint: "github_pat_… — stored encrypted like all other secrets; TEST proves it can actually see the repo (a token not scoped to a private repo reads as \"not found\", not \"forbidden\")" },
+    ],
+  },
+  {
     id: "ai",
     title: "CLAUDE AI — ANALYSIS ENGINE",
     note: "Powers the AI log analysis and ZHA mesh insights on the Home page. Create an API key at console.anthropic.com → API Keys. Analyses run on claude-opus-4-8; logs are sent to the Anthropic API when you click an analyse button, never automatically.",

@@ -30,6 +30,8 @@ SECRET_FIELDS = {
     "ai": ["api_key"],  # Anthropic API key for analysis features
     # container registry credentials (app/registry.py update checks)
     "registries": ["dockerhub_token", "ghcr_token"],
+    # GitHub lab-issues link (app/labissues.py) — not a connector, see ADR-0001
+    "labissues": ["token"],
     # notification channels (app/notify.py) — stored like any other system
     "ntfy": ["topic"],  # the topic name is the only secret ntfy has
     "webhook": [],
@@ -48,6 +50,7 @@ SYSTEM_LABELS = {
     "synology": "Synology NAS",
     "ai": "Claude AI",
     "registries": "Container Registries",
+    "labissues": "Lab Issues (GitHub)",
     "ntfy": "ntfy",
     "webhook": "Webhook",
     "telegram": "Telegram",

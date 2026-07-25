@@ -23,8 +23,8 @@ import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from app import (ai, chat, monitors, notify, oplog, poller, registry, reports, scanner,
-                 smart, store)
+from app import (ai, chat, labissues, monitors, notify, oplog, poller, registry, reports,
+                 scanner, smart, store)
 from app.connectors import CONNECTORS, docker, homeassistant, proxmox, synology, unifi
 from app.httpclient import HttpError
 
@@ -91,6 +91,9 @@ def route_system_test(_m, p, _b):
         result = ai.test(s)
     elif sid == "registries":
         result = registry.test_credentials()
+    elif sid == "labissues":
+        # not a connector (ADR-0001) — owns its own settings read
+        result = labissues.test()
     elif sid in notify.CHANNEL_IDS:
         result = notify.test_channel(sid)
     elif sid in CONNECTORS:
