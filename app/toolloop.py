@@ -45,6 +45,20 @@ MAX_TOKENS = 16000             # caps thinking + text together
 MAX_ITERATIONS = 15            # tools withheld on the final one
 CONTEXT_BUDGET = 120_000       # input tokens one run may accumulate
 CONTEXT_FULL_AT = 0.8          # fraction of the budget at which a run stops
+
+
+def budget_reached(used: int, budget: int = CONTEXT_BUDGET) -> bool:
+    """Has a run used up its context budget?
+
+    The single place this threshold is decided. `run` stops on it mid-loop,
+    and a caller that persists the transcript must refuse to resume on the
+    same answer — a stopped run ends on an unpaired tool_use the API rejects.
+    Two copies of this comparison would eventually disagree; one cannot.
+
+    Stops short of the budget itself so there is still headroom for the tool
+    results the next iteration would have appended.
+    """
+    return used >= budget * CONTEXT_FULL_AT
 API_TIMEOUT = 600
 MAX_TOOL_RESULT = 60_000       # characters of rendered envelope per tool_result
 
@@ -159,9 +173,6 @@ def run(client, messages: list, *, schemas: list, system: list,
     # Duplicate-call guard is per RUN, not per conversation: a follow-up
     # "check again now" must be able to re-run the same query.
     seen: set = set()
-    # Stop while there is still headroom for the tool results the next
-    # iteration would append, rather than at the budget itself.
-    stop_at = context_budget * CONTEXT_FULL_AT
 
     for step in range(max_iterations):
         last_step = step == max_iterations - 1
@@ -210,8 +221,15 @@ def run(client, messages: list, *, schemas: list, system: list,
         # run that would blow the budget stops instead of completing and being
         # billed. Every response's prompt carries the whole transcript, so the
         # latest prompt size IS the accumulated input.
+        #
+        # Breaking here leaves `messages` ending on an assistant turn whose
+        # tool_use blocks have no matching tool_result — a transcript the API
+        # will reject if it is ever sent back. That is safe only because a
+        # caller persisting it must refuse to resume it, which chat.run_turn
+        # does by asking budget_reached() the same question with the same
+        # threshold. Keep those two in lockstep or resuming crashes.
         used = prompt_tokens(reply.usage)
-        if used >= stop_at:
+        if budget_reached(used, context_budget):
             failure = (f"stopped before the next tool call: this run has used its "
                        f"context budget ({used:,} of {context_budget:,} input tokens)")
             yield "error", {"message": failure}
@@ -240,10 +258,15 @@ def run(client, messages: list, *, schemas: list, system: list,
                     # No approval channel: the write cannot happen. Report it as
                     # an error result so the model reacts instead of assuming it
                     # succeeded, and keep going read-only.
+                    # Deliberately does not say *what* the write touches: the
+                    # lab and the tracker are distinct boundaries (CONTEXT.md,
+                    # "read-only"), and this module is shared by callers that
+                    # mean different ones.
                     env = tools.envelope(
                         "error", invocation=env["invocation"], params=params,
-                        error="this tool changes the lab and needs a human to "
-                              "approve it; this run is read-only, so it did not run")
+                        error="this tool makes a change and needs a human to "
+                              "approve it; this run has no approval channel, "
+                              "so it did not run")
                 else:
                     pending = approval(call.name, params, call.id, env, results)
                     yield "tool_result", {"name": call.name, "envelope": env}

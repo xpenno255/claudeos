@@ -30,10 +30,10 @@ PATH = os.path.join(DATA_DIR, "chats.json")
 
 MODEL = toolloop.MODEL
 KEEP_CONVERSATIONS = 20
-# The loop stops a turn that reaches CONTEXT_FULL_AT of the budget; these are
-# re-exported so the turn-entry refusal and the UI gauge use the same numbers.
+# Only for the UI's percentage gauge. Whether a turn is *full* is never decided
+# here — toolloop.budget_reached() owns that, so the loop's mid-run stop and the
+# turn-entry refusal cannot drift apart.
 CONTEXT_BUDGET = toolloop.CONTEXT_BUDGET
-CONTEXT_FULL_AT = toolloop.CONTEXT_FULL_AT
 APPROVAL_TTL = 30 * 60         # seconds
 
 SYSTEM_PROMPT = """You are the ops assistant inside ClaudeOS, a homelab mission-control app. You answer questions about this specific homelab using the tools provided, and you can make changes when the user approves them.
@@ -193,7 +193,7 @@ def _finish(conv: dict, payload: dict, *, suspended: bool):
         "tools": payload.get("tools", 0),
         "prompt_tokens": prompt_tokens,
         "context_pct": round(100 * prompt_tokens / CONTEXT_BUDGET, 1) if prompt_tokens else 0,
-        "context_full": prompt_tokens >= CONTEXT_BUDGET * CONTEXT_FULL_AT,
+        "context_full": toolloop.budget_reached(prompt_tokens),
         "total_usd": round(sum(t.get("cost_usd", 0) for t in conv["turns"]), 4),
     }
 
@@ -217,8 +217,11 @@ def run_turn(message: str, conversation_id: str | None = None):
 
     if conv.get("pending"):
         raise ValueError("resolve the pending action before sending another message")
+    # Not just a courtesy: a turn the loop stopped on budget left the transcript
+    # ending on an unpaired tool_use, so resuming it would be rejected by the
+    # API. Same predicate as the loop's, so the two cannot drift apart.
     used = conv["turns"][-1]["prompt_tokens"] if conv.get("turns") else 0
-    if used >= CONTEXT_BUDGET * CONTEXT_FULL_AT:
+    if toolloop.budget_reached(used):
         raise ValueError("this conversation is full — start a new one")
 
     _claim(conv["id"])
