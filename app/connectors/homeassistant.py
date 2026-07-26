@@ -7,6 +7,7 @@ access tokens). Settings: host (e.g. http://192.168.1.20:8123), token.
 import json
 
 from .. import httpclient
+from ._report import soft
 
 # Domains surfaced in the Operations page with quick toggles.
 TOGGLE_DOMAINS = {"light", "switch", "fan", "input_boolean", "automation", "script"}
@@ -84,6 +85,36 @@ def metrics(summary: dict) -> dict:
         "unavailable": summary.get("unavailable"),
         "lights_on": summary.get("lights_on"),
     }
+
+
+def report_slice(settings: dict) -> dict:
+    """What the weekly digest wants from Home Assistant.
+
+    ZHA is split into offline devices and weak links (LQI < 80) because they
+    are different problems: an offline device has already failed, a weak link
+    is the one that will. Both are capped — a large mesh degrading at once
+    would otherwise crowd out every other system in the digest.
+    """
+    ha = {"summary": soft(summary, settings)}
+    ups = soft(updates, settings)
+    if isinstance(ups, list):
+        ha["updates_available"] = [
+            f"{u['name']}: {u['installed']} → {u['latest']}"
+            for u in ups if u.get("available")][:20]
+    else:
+        ha["updates_available"] = ups
+    zha = soft(zha_devices, settings)
+    if isinstance(zha, list):
+        ha["zha"] = {
+            "devices": len(zha),
+            "offline": [d.get("name") for d in zha if d.get("available") is False][:15],
+            "weak_links": [d.get("name") for d in zha
+                           if d.get("available") is not False
+                           and d.get("lqi") is not None and d.get("lqi") < 80][:15],
+        }
+    else:
+        ha["zha"] = zha
+    return ha
 
 
 def system_info(settings: dict) -> dict:

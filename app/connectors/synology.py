@@ -16,6 +16,7 @@ import threading
 import urllib.parse
 
 from .. import httpclient
+from ._report import soft
 
 # DSM API error codes worth translating for humans.
 _ERRORS = {
@@ -191,6 +192,29 @@ def metrics(summary: dict) -> dict:
         "mem_pct": summary.get("mem_pct"),
         "vol_pct": summary.get("vol_pct"),
     }
+
+
+def report_slice(settings: dict) -> dict:
+    """What the weekly digest wants from the NAS: the summary, plus only the
+    volumes and disks that are *not* normal.
+
+    Listing every healthy disk would be pages of noise in a prose report, and
+    the digest's job is to say what needs attention. A `None` status counts as
+    normal here — DSM omits the field on some models, and a missing field is
+    not evidence of a fault.
+    """
+    nas = {"summary": soft(summary, settings)}
+    st = soft(storage, settings)
+    if isinstance(st, dict):
+        nas["abnormal_volumes"] = [
+            f"{v['name']}: {v['status']}" for v in st.get("volumes", [])
+            if v.get("status") not in ("normal", None)]
+        nas["abnormal_disks"] = [
+            f"{d['name']} ({d['model']}): status={d['status']} smart={d['smart']}"
+            for d in st.get("disks", [])
+            if d.get("status") not in ("normal", None)
+            or d.get("smart") not in ("normal", "safe", None)]
+    return nas
 
 
 def storage(settings: dict) -> dict:

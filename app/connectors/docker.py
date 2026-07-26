@@ -13,6 +13,7 @@ Host CPU/RAM/disk/GPU come from a Glances sidecar on the same VM
 """
 
 from .. import httpclient
+from ._report import soft
 
 CONTAINER_ACTIONS = {"start", "stop", "restart"}
 
@@ -181,6 +182,22 @@ def metrics(summary: dict) -> dict:
         # first GPU only: the chart has one line, and a second card is rare
         "gpu_util_pct": gpus[0].get("util_pct") if gpus else None,
         "gpu_vram_pct": gpus[0].get("mem_pct") if gpus else None,
+    }
+
+
+def report_slice(settings: dict) -> dict:
+    """What the weekly digest wants from Docker: the fleet, and which of ~38
+    containers are not running — the names, because a count alone tells the
+    reader nothing about whether it matters.
+
+    Image updates are *not* here: the registry check owns its own cache and
+    credentials in `app/registry.py`, so `reports.py` attaches them.
+    """
+    conts = soft(containers, settings)
+    return {
+        "summary": soft(summary, settings),
+        "not_running": ([c.get("name") for c in conts if c.get("state") != "running"]
+                        if isinstance(conts, list) else conts),
     }
 
 

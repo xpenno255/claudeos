@@ -20,9 +20,14 @@ connector on a 30s interval, records ok/error plus sparkline metrics, and alerts
 `True→False` transition.
 
 **The interface is written down**, in the `app/connectors/__init__.py` docstring:
-`test`, `summary` and `metrics`, the settings shape, and the exception taxonomy the
-server maps to HTTP status. It is the contract a new connector satisfies and the only
-thing the poller and the server know about any of them.
+`test`, `summary`, `metrics` and `report_slice`, the settings shape, and the exception
+taxonomy the server maps to HTTP status. It is the contract a new connector satisfies
+and the only thing the poller, the server and the weekly report know about any of them.
+
+Each connector curates its own contribution to the digest, so what is *interesting*
+about a system is decided by that system's adapter and nowhere else. Where the digest
+wants something another module owns — the SMART cache, the registry check —
+`reports.py` attaches it, so a connector never reaches into app state.
 
 **Not every external system ClaudeOS talks to is a connector.** `ai`, `registries`, the
 five notification channels, and `labissues` are all configured on Setup and hold
