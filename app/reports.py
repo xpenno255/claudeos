@@ -6,6 +6,12 @@ monitors, recent warnings), Claude turns it into a graded digest with
 ranked findings, and the result is delivered through the notification
 layer and kept in data/reports.json (last KEEP reports).
 
+What each system contributes is that connector's `report_slice`, not this
+module's business — `collect()` iterates `CONNECTORS` and knows no summary
+shapes. What stays here is what belongs to no single connector: the uptime
+monitors, the week's warnings, the lab issue queue, the metric aggregates,
+and the two app-module caches attached to a system's block.
+
 Scheduling is a lightweight stdlib loop: every few minutes it checks
 whether the configured weekly slot (day + hour, server-local time) has
 passed since the last run.
@@ -19,7 +25,8 @@ import threading
 import time
 
 from . import ai, labissues, monitors, notify, oplog, poller, registry, smart, store
-from .connectors import docker, homeassistant, proxmox, synology, unifi
+from .connectors import CONNECTORS
+from .connectors._report import soft
 from .store import DATA_DIR
 
 PATH = os.path.join(DATA_DIR, "reports.json")
@@ -104,13 +111,6 @@ def set_config(cfg: dict) -> dict:
 
 # ---------------------------------------------------------------- collect
 
-def _try(fn, *args):
-    try:
-        return fn(*args)
-    except Exception as e:  # noqa: BLE001 — a dead system is itself a finding
-        return {"error": str(e)}
-
-
 def _sys(system_id: str) -> dict | None:
     s = store.get_system(system_id, reveal_secrets=True)
     return s if s and s.get("host") else None
@@ -138,76 +138,30 @@ def collect() -> dict:
     data = {"generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
             "systems": {}}
 
-    if (s := _sys("unifi")):
-        ins = _try(unifi.insights, s)
-        sec = _try(unifi.events, s, ["SECURITY"], 0, 10)
-        anoms = _try(unifi.anomalies, s)
-        data["systems"]["unifi"] = {
-            "summary": _try(unifi.summary, s),
-            "gateway": ins.get("gateway"),
-            "port_issues": (ins.get("port_issues") or [])[:5],
-            "firmware_updates": ins.get("updates"),
-            "security_events_total": sec.get("total"),
-            "recent_security_events": [e.get("message") for e in (sec.get("events") or [])[:8]],
-            "client_anomalies": anoms[:10] if isinstance(anoms, list) else anoms,
-        }
+    # What is interesting about a system is that system's own business: each
+    # connector curates its slice, and a new one appears here without this
+    # module being touched.
+    for sid, mod in CONNECTORS.items():
+        if (s := _sys(sid)):
+            data["systems"][sid] = mod.report_slice(s)
 
-    if (s := _sys("proxmox")):
-        disks = _try(smart.get)
-        data["systems"]["proxmox"] = {
-            "summary": _try(proxmox.summary, s),
-            "nodes": _try(proxmox.nodes, s),
-            "storage": _try(proxmox.storage, s),
-            "disk_smart": disks.get("disks", disks) if isinstance(disks, dict) else disks,
-        }
+    # Two exceptions, attached rather than pushed behind the seam. Both are
+    # reported inside a connector's block because that is where a reader looks
+    # for them, but neither is that connector's to produce: the SMART sweep
+    # reads Proxmox's disks on its own schedule through `app/smart.py`, and the
+    # registry check is Docker's images seen from outside Docker, with its own
+    # credentials. A connector that fetched them would be reaching into app
+    # state, which is the coupling this seam exists to prevent.
+    if "proxmox" in data["systems"]:
+        disks = soft(smart.get)
+        data["systems"]["proxmox"]["disk_smart"] = (
+            disks.get("disks", disks) if isinstance(disks, dict) else disks)
 
-    if (s := _sys("docker")):
-        summ = _try(docker.summary, s)
-        conts = _try(docker.containers, s)
-        not_running = ([c.get("name") for c in conts if c.get("state") != "running"]
-                       if isinstance(conts, list) else conts)
-        ups = _try(registry.get)
-        image_updates = ([i["ref"] for i in ups.get("images", []) if i.get("status") == "update"]
-                         if isinstance(ups, dict) else ups)
-        data["systems"]["docker"] = {"summary": summ, "not_running": not_running,
-                                     "image_updates_available": image_updates}
-
-    if (s := _sys("homeassistant")):
-        ha = {"summary": _try(homeassistant.summary, s)}
-        ups = _try(homeassistant.updates, s)
-        if isinstance(ups, list):
-            ha["updates_available"] = [
-                f"{u['name']}: {u['installed']} → {u['latest']}"
-                for u in ups if u.get("available")][:20]
-        else:
-            ha["updates_available"] = ups
-        zha = _try(homeassistant.zha_devices, s)
-        if isinstance(zha, list):
-            ha["zha"] = {
-                "devices": len(zha),
-                "offline": [d.get("name") for d in zha if d.get("available") is False][:15],
-                "weak_links": [d.get("name") for d in zha
-                               if d.get("available") is not False
-                               and d.get("lqi") is not None and d.get("lqi") < 80][:15],
-            }
-        else:
-            ha["zha"] = zha
-        data["systems"]["homeassistant"] = ha
-
-    if (s := _sys("synology")):
-        summ = _try(synology.summary, s)
-        nas = {"summary": summ}
-        st = _try(synology.storage, s)
-        if isinstance(st, dict):
-            nas["abnormal_volumes"] = [
-                f"{v['name']}: {v['status']}" for v in st.get("volumes", [])
-                if v.get("status") not in ("normal", None)]
-            nas["abnormal_disks"] = [
-                f"{d['name']} ({d['model']}): status={d['status']} smart={d['smart']}"
-                for d in st.get("disks", [])
-                if d.get("status") not in ("normal", None)
-                or d.get("smart") not in ("normal", "safe", None)]
-        data["systems"]["synology"] = nas
+    if "docker" in data["systems"]:
+        ups = soft(registry.get)
+        data["systems"]["docker"]["image_updates_available"] = (
+            [i["ref"] for i in ups.get("images", []) if i.get("status") == "update"]
+            if isinstance(ups, dict) else ups)
 
     mons = monitors.list_monitors()
     data["uptime_monitors"] = [
@@ -222,7 +176,7 @@ def collect() -> dict:
 
     # A top-level section, alongside the monitors and the warnings — not a
     # per-connector block, because lab issues are not a connector (ADR-0001).
-    data["lab_issues"] = _try(labissues.report_section)
+    data["lab_issues"] = soft(labissues.report_section)
 
     data["metric_stats_last_hour"] = _metric_stats()
     return data

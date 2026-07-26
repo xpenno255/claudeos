@@ -12,7 +12,7 @@ correctly without knowing which exceptions mean what.
 
 ## Required functions
 
-Every module in `CONNECTORS` exports exactly these three:
+Every module in `CONNECTORS` exports exactly these four:
 
     test(settings)    -> {"ok": bool, "detail": str}
         Prove the credentials work, for the Setup page's TEST button. Cheapest
@@ -34,9 +34,26 @@ Every module in `CONNECTORS` exports exactly these three:
         Metric names are the keys the frontend reads out of `/api/history` and
         are effectively public — renaming one silently empties a chart.
 
-Anything beyond these three (`devices`, `guests`, `storage`, `error_log` …) is
+    report_slice(settings) -> dict
+        What this system contributes to the weekly AI digest, and how much of
+        it: the connector decides what is worth a paragraph and what is noise,
+        because it is the only thing that knows. Runs weekly, not every 30
+        seconds, so unlike `summary` it can afford several calls.
+
+        Wrap each one in `_report.soft`, which turns a failure into
+        `{"error": ...}` in place. The report prompt is told that an errored
+        section means the system was unreachable and that this is itself a
+        finding, so one dead call must not cost the other four systems their
+        slice.
+
+Anything beyond these four (`devices`, `guests`, `storage`, `error_log` …) is
 that connector's own surface, reached only by routes that already know which
-system they are talking to. The seam is the three.
+system they are talking to. The seam is the four.
+
+A connector never reaches into app state for its slice. Where the digest wants
+something a *different* module owns — the SMART sweep's cache, the container
+registry check — `reports.py` attaches it after the fact, so the dependency
+runs inwards and not the other way about.
 
 ## Settings
 

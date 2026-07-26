@@ -11,6 +11,7 @@ import threading
 import time
 
 from .. import httpclient
+from ._report import soft
 
 _session_lock = threading.Lock()
 _session: dict = {}  # {cookie, csrf, host, ts}
@@ -110,6 +111,27 @@ def metrics(summary: dict) -> dict:
         "latency_ms": summary.get("isp_latency_ms"),
         "wan_rx_bps": summary.get("rx_bytes_r"),
         "wan_tx_bps": summary.get("tx_bytes_r"),
+    }
+
+
+def report_slice(settings: dict) -> dict:
+    """What the weekly digest wants from UniFi.
+
+    Security events are capped at the ten most recent and quoted as messages
+    only: the digest is prose about the week, and the full event objects are
+    both large and already on the Ops page for anyone who wants them.
+    """
+    ins = soft(insights, settings)
+    sec = soft(events, settings, ["SECURITY"], 0, 10)
+    anoms = soft(anomalies, settings)
+    return {
+        "summary": soft(summary, settings),
+        "gateway": ins.get("gateway"),
+        "port_issues": (ins.get("port_issues") or [])[:5],
+        "firmware_updates": ins.get("updates"),
+        "security_events_total": sec.get("total"),
+        "recent_security_events": [e.get("message") for e in (sec.get("events") or [])[:8]],
+        "client_anomalies": anoms[:10] if isinstance(anoms, list) else anoms,
     }
 
 

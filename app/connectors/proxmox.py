@@ -10,6 +10,7 @@ Auth: API token — create one in Datacenter → Permissions → API Tokens
 import re
 
 from .. import httpclient
+from ._report import soft
 
 VM_ACTIONS = {"start", "stop", "shutdown", "reboot"}
 TOKEN_ID_RE = re.compile(r"^[^@!\s]+@[^@!\s]+![^@!\s]+$")  # user@realm!tokenname
@@ -148,6 +149,20 @@ def metrics(summary: dict) -> dict:
         "cpu_pct": round(cpu * 100, 1) if cpu is not None else None,
         "mem_pct": round(mem_pct, 1) if mem_pct is not None else None,
         "guests_running": summary.get("guests_running"),
+    }
+
+
+def report_slice(settings: dict) -> dict:
+    """What the weekly digest wants from Proxmox.
+
+    Disk SMART is *not* here: the sweep owns its own cache and schedule in
+    `app/smart.py`, so `reports.py` attaches it to this block rather than
+    having the connector reach into app state to fetch it.
+    """
+    return {
+        "summary": soft(summary, settings),
+        "nodes": soft(nodes, settings),
+        "storage": soft(storage, settings),
     }
 
 
