@@ -11,10 +11,18 @@ python3 -m unittest discover -s tests
 ```
 
 Standard library only — no pytest, no dev dependency. Coverage is **deliberately
-narrow**: `app/labissues.py` is the one module with a test seam, because it takes
-its GitHub caller as an argument and its failure modes (re-triage loops, budget
-overruns) are silent and expensive. The rest of the app has no tests and this is
-not a request to backfill them; add a seam only where a module earns one.
+narrow**, and the bar is one thing: failure modes that are *silent and
+expensive*. Two modules clear it.
+
+- `app/labissues.py` (with `app/triagelog.py`) — takes its GitHub caller, its
+  analysis run and its tracker writes as arguments, so re-triage loops and
+  budget overruns are tested with no network, no Anthropic call and no
+  credentials.
+- `app/store.py` — one invariant only: saving never silently loses a secret
+  (#39 destroyed a real credential during an unrelated edit and said nothing).
+
+Everything else has no tests and this is **not** a request to backfill them; add
+a seam only where a module earns one, and say in the test file why it did.
 
 ## Agent skills
 

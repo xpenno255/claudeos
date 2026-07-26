@@ -104,8 +104,22 @@ def _save_raw(cfg: dict) -> None:
 def save_system(system_id: str, settings: dict) -> None:
     """Persist settings for a system, encrypting secret fields.
 
-    An empty/missing secret field keeps the previously stored value so the
-    user never has to re-enter it just to change a hostname.
+    A secret field that arrives empty **or does not arrive at all** keeps the
+    previously stored value, so changing a hostname never costs you the
+    password. Non-secret fields are replaced wholesale: what the payload says
+    is what the system has, and an omitted one is removed.
+
+    That asymmetry is the point. The Setup form renders a secret as an empty
+    box captioned "leave blank to keep", and blank must therefore mean keep on
+    every path into here — including the one where the caller, seeing nothing
+    typed, sends no key at all. Getting this wrong destroys a credential during
+    an edit that looks unrelated, and says nothing: the system simply stops
+    connecting at the next sweep.
+
+    Consequence: a secret cannot be cleared by saving. Removing a credential
+    means `delete_system`, or overwriting it with a new one — which is the
+    honest set of options, because nothing in the UI offers "blank this out"
+    and blank already means something else.
     """
     if system_id not in SECRET_FIELDS:
         raise ValueError(f"unknown system: {system_id}")
@@ -119,10 +133,15 @@ def save_system(system_id: str, settings: dict) -> None:
             if k in SECRET_FIELDS[system_id]:
                 if v:
                     entry[k] = {"enc": _encrypt(str(v))}
-                elif k in existing:
-                    entry[k] = existing[k]
             else:
                 entry[k] = v
+        # Carry forward every secret the payload did not replace. Done after the
+        # loop, over SECRET_FIELDS rather than over the payload, because the
+        # case that matters is the key that never appears — a loop across
+        # `settings` cannot see it, which is exactly how this was lost before.
+        for k in SECRET_FIELDS[system_id]:
+            if k not in entry and k in existing:
+                entry[k] = existing[k]
         cfg[system_id] = entry
         _save_raw(cfg)
 
