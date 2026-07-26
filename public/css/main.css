@@ -280,6 +280,22 @@ a.rail-sys:hover .sys-name { color: var(--amber); }
 }
 .hero-empty p { color: var(--ink-2); max-width: 480px; margin: 0 auto 22px; }
 
+/* alert banner: full-width row above the tiles, warning-cornered */
+.banner-alert {
+  display: flex; align-items: center; gap: 16px;
+  margin-bottom: 18px;
+  border-color: rgba(250,178,25,.38);
+}
+.banner-alert::before, .banner-alert::after { border-color: var(--warning); }
+.banner-alert .glyph { font-size: 24px; color: var(--warning); flex: none; }
+.banner-alert .banner-body { flex: 1; min-width: 0; }
+.banner-alert h3 {
+  font-family: var(--font-display); font-size: 13px; font-weight: 600;
+  letter-spacing: .18em; color: var(--warning); margin-bottom: 2px;
+}
+.banner-alert p { color: var(--ink-2); }
+.banner-alert a { flex: none; }
+
 /* ── buttons ───────────────────────────────────────────────────── */
 
 .btn {

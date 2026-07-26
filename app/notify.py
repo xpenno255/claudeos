@@ -13,8 +13,14 @@ channel is a plain HTTP POST, so the stdlib http client is enough:
 Channel settings live in the encrypted store like any other system.
 Priorities are "low" | "default" | "high" | "urgent"; tags are ntfy-style
 emoji shortcodes and pass through to webhooks verbatim.
+
+An install with no channel configured cannot deliver anything, which is a
+third outcome beside sent and failed and is recorded as one — see **the
+zero-channel gap** below.
 """
 
+import json
+import os
 import threading
 import time
 
@@ -147,8 +153,17 @@ def send(title: str, message: str, priority: str = "default",
 
 
 def _fan_out(title, message, priority, tags):
+    live = channels()
+    if not live:
+        # Nowhere to send: not a delivery failure, because nothing was attempted
+        # and nothing can be retried. Recorded rather than dropped — this branch
+        # used to fall through every other one and say nothing at all.
+        _record_drop(title, priority)
+        oplog.add("warn", "notify", f'alert "{title}" had nowhere to go '
+                                    "— no notification channel is configured")
+        return
     sent, failed = [], []
-    for cid in channels():
+    for cid in live:
         try:
             _SENDERS[cid](_channel_settings(cid), title, message, priority, tags)
             sent.append(_label(cid))
@@ -157,6 +172,96 @@ def _fan_out(title, message, priority, tags):
             oplog.add("warn", "notify", f"{_label(cid)} delivery failed: {e}")
     if sent:
         oplog.add("info", "notify", f'alert "{title}" sent via {", ".join(sent)}')
+    _clear_gap()
+
+
+# ------------------------------------------------- the zero-channel gap
+
+# The ops-log line above is the audit record of a dropped alert, but the ops log
+# is where somebody looks *after* they suspect something, and an install that has
+# never notified is not a state anybody thinks to suspect. So the drops are also
+# counted, and the dashboard says so until a channel exists — the app's own rule
+# (CONTEXT.md → notification volume) is that a feature which has silently stopped
+# working is worth interrupting for, and alerting is that feature here.
+#
+# Deliberately quiet until something is actually lost: a homelab owner may
+# genuinely want no push notifications, and nagging a working install about a
+# channel it does not need is how a warning gets trained away.
+#
+# Persisted because deploys are `docker compose pull && up -d`. A count held only
+# in memory would forget precisely the alerts that were dropped overnight.
+GAP_PATH = os.path.join(store.DATA_DIR, "notify.json")
+
+_gap_lock = threading.Lock()
+
+
+def _read_gap() -> dict:
+    try:
+        with open(GAP_PATH, "r", encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        # No ops-log line: this file is a convenience over the log, and the log
+        # already holds every drop it would have described.
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def _write_gap(d: dict) -> None:
+    try:
+        os.makedirs(store.DATA_DIR, exist_ok=True)
+        tmp = GAP_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, indent=1)
+        os.replace(tmp, GAP_PATH)
+    except OSError:
+        pass  # bookkeeping must never be what breaks the alert path
+
+
+def _record_drop(title: str, priority: str) -> None:
+    """Count one alert that had nowhere to go.
+
+    `send` has already muted an identical title for `COOLDOWN_S` before this is
+    reached, so a flapping system counts once per cooldown rather than once per
+    poll — the same shape delivery would have had.
+    """
+    with _gap_lock:
+        d = _read_gap()
+        d["count"] = int(d.get("count") or 0) + 1
+        d["last_title"] = title
+        d["last_priority"] = priority
+        d["last_ts"] = time.time()
+        d.setdefault("since", d["last_ts"])
+        _write_gap(d)
+
+
+def _clear_gap() -> None:
+    """Forget the drops: a channel exists, so the gap they describe is closed.
+
+    Called whichever way delivery went. A configured channel that fails logs its
+    own failure and is a different problem — the one this record exists for is
+    having nowhere to send at all.
+    """
+    with _gap_lock:
+        if not _read_gap().get("count"):
+            return
+        _write_gap({})
+
+
+def alerting_gap() -> dict | None:
+    """What alerting has lost for want of a channel, or None if nothing.
+
+    None also once a channel is configured, even with drops still on record: the
+    dashboard renders this, and a banner asking for something already done is
+    worse than no banner.
+    """
+    if channels():
+        return None
+    d = _read_gap()
+    if not d.get("count"):
+        return None
+    return {"count": int(d["count"]), "last_title": d.get("last_title"),
+            "last_priority": d.get("last_priority"),
+            "last_ts": d.get("last_ts"), "since": d.get("since")}
 
 
 def test_channel(cid: str) -> dict:
