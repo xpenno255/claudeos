@@ -788,12 +788,24 @@ class RunTriageTest(IsolatedDataDirTest):
 # ---------------------------------------------------------------- #36: the sweep
 
 def issues(*specs):
-    """Open issues in the cache's shape. `specs` are (number, labels, updated)."""
-    return [{"number": n, "title": f"issue {n}", "state": "open", "labels": list(labels),
-             "body": "", "created_at": f"2026-07-{n:02d}T00:00:00Z",
-             "updated_at": updated or f"2026-07-{n:02d}T00:00:00Z",
-             "html_url": f"https://github.com/x/y/issues/{n}"}
-            for n, labels, updated in specs]
+    """Open issues in the cache's shape.
+
+    `specs` are `(number, labels, updated)`, with an optional fourth element
+    overriding `created_at` for the age-based tests.
+    """
+    out = []
+    for spec in specs:
+        n, labels, updated = spec[0], spec[1], spec[2]
+        # Minutes old by default, lower numbers older — so "oldest first" still
+        # means issue #1 while nothing is old enough to count as a backlog.
+        default = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                time.gmtime(time.time() - (60 - n) * 60))
+        created = spec[3] if len(spec) > 3 else default
+        out.append({"number": n, "title": f"issue {n}", "state": "open",
+                    "labels": list(labels), "body": "", "created_at": created,
+                    "updated_at": updated or created,
+                    "html_url": f"https://github.com/x/y/issues/{n}"})
+    return out
 
 
 class AutoTriageTest(IsolatedDataDirTest):
@@ -1117,6 +1129,259 @@ class VerdictDetailTest(IsolatedDataDirTest):
 
         self.assertIsNone(got["verdict"])
         self.assertEqual(got["source"], "none")
+
+
+# ------------------------------------------- #38: telling somebody, and the report
+
+def sink():
+    """Collects notifications instead of sending them."""
+    sent = []
+
+    def _send(**kw):
+        sent.append(kw)
+
+    _send.sent = sent
+    return _send
+
+
+class VerdictNotificationTest(IsolatedDataDirTest):
+    """Which verdicts are worth interrupting somebody for.
+
+    The gate is severity, not the five-minute mute: mute keys on the exact
+    title string and these titles carry issue numbers, so no two are ever equal
+    and the mute can never collapse them. Get the gate wrong and the feature
+    either goes silent or pages the owner about a plug.
+    """
+
+    def dispatch(self, over=None, notifier=None):
+        return self.labissues.run_triage(
+            1, issue=ISSUE, analyse=analysis({**VERDICT, **(over or {})}),
+            comment=self.tracker.comment, label=self.tracker.label,
+            notifier=notifier)
+
+    def test_a_diagnosed_critical_verdict_notifies(self):
+        told = sink()
+
+        self.dispatch({"verdict": "diagnosed", "severity": "critical"}, notifier=told)
+
+        self.assertEqual(len(told.sent), 1)
+        self.assertIn("#1", told.sent[0]["title"], "the title must name the issue")
+
+    def test_a_diagnosed_serious_verdict_notifies(self):
+        told = sink()
+
+        self.dispatch({"verdict": "diagnosed", "severity": "serious"}, notifier=told)
+
+        self.assertEqual(len(told.sent), 1)
+
+    def test_a_verdict_does_not_outrank_lab_down(self):
+        """`high` is reserved for lab-down and failing hardware. The owner filed
+        this issue themselves — they know about it — so a verdict on it must not
+        arrive at the same volume as a dead gateway."""
+        told = sink()
+
+        self.dispatch({"verdict": "diagnosed", "severity": "critical"}, notifier=told)
+
+        self.assertEqual(told.sent[0]["priority"], "default")
+
+    def test_a_diagnosed_verdict_below_serious_stays_quiet(self):
+        told = sink()
+
+        self.dispatch({"verdict": "diagnosed", "severity": "warning"}, notifier=told)
+        self.dispatch({"verdict": "diagnosed", "severity": "info"}, notifier=told)
+
+        self.assertEqual(told.sent, [])
+
+    def test_the_other_three_verdicts_stay_quiet_at_every_severity(self):
+        """Refuted, inconclusive and no-fault-found are all steady state: useful
+        to read, never worth an interruption."""
+        told = sink()
+
+        for value in ("refuted", "inconclusive", "no_fault_found"):
+            for sev in ("critical", "serious", "warning", "info"):
+                self.dispatch({"verdict": value, "severity": sev}, notifier=told)
+
+        self.assertEqual(told.sent, [])
+
+    def test_a_single_failed_run_notifies_nothing(self):
+        """One failed run is not systemic. It goes to the ops log, which the
+        weekly report already sweeps — so it is reported without paging anyone."""
+        told = sink()
+
+        self.labissues.run_triage(
+            1, issue=ISSUE, analyse=analysis(raises=self.labissues.TriageFailed("api down")),
+            comment=self.tracker.comment, label=self.tracker.label, notifier=told)
+
+        self.assertEqual(told.sent, [])
+        logged = [e for e in _oplog.recent(50)
+                  if e["system"] == "labissues" and "api down" in e["message"]]
+        self.assertEqual(len(logged), 1, "a failed run left no trace in the ops log")
+
+
+class CredentialAlertTest(IsolatedDataDirTest):
+    """The token expires in July 2027, so this state is a certainty. It is the
+    one lab-issues failure that is genuinely systemic: the feature has silently
+    stopped working and nothing else will say so."""
+
+    def test_a_rejected_token_notifies_at_high_priority(self):
+        told = sink()
+
+        with self.assertRaises(HttpError):
+            self.labissues.sweep(fetch=fake(raises=HttpError(401, "unauthorised", "", headers={})),
+                                 notifier=told)
+
+        self.assertEqual(len(told.sent), 1)
+        self.assertEqual(told.sent[0]["priority"], "high")
+
+    def test_a_token_that_cannot_see_the_repo_notifies_too(self):
+        """A private repo the token is not scoped to answers 404, not 403 — the
+        same silent stop, wearing a different status code."""
+        told = sink()
+
+        with self.assertRaises(HttpError):
+            self.labissues.sweep(fetch=fake(raises=HttpError(404, "not found", "", headers={})),
+                                 notifier=told)
+
+        self.assertEqual(len(told.sent), 1)
+
+    def test_it_alerts_on_the_transition_not_once_a_minute(self):
+        """The sweep runs every 60s and a revoked token does not heal itself.
+        Alerting per pass is 1,440 pushes a day."""
+        told = sink()
+        dead = fake(raises=HttpError(401, "unauthorised", "", headers={}))
+
+        for _ in range(3):
+            with self.assertRaises(HttpError):
+                self.labissues.sweep(fetch=dead, notifier=told)
+
+        self.assertEqual(len(told.sent), 1)
+
+    def test_a_rate_limit_is_not_a_credential_failure(self):
+        """Exhausting the hourly budget is transient and already handled by the
+        backoff. Paging somebody for it would train them to ignore this alert."""
+        told = sink()
+        reset = int(time.time()) + 300
+        limited = HttpError(403, "forbidden", "", headers={
+            "X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(reset)})
+
+        with self.assertRaises(HttpError):
+            self.labissues.sweep(fetch=fake(raises=limited), notifier=told)
+
+        self.assertEqual(told.sent, [])
+
+    def test_a_recovered_sweep_re_arms_the_alert(self):
+        """Rotate the token and it works again; if it is revoked a second time,
+        that is a second transition and worth a second alert."""
+        told = sink()
+        dead = fake(raises=HttpError(401, "unauthorised", "", headers={}))
+
+        with self.assertRaises(HttpError):
+            self.labissues.sweep(fetch=dead, notifier=told)
+        self.labissues.sweep(fetch=fake(200, [ISSUE], {"ETag": 'W/"a"'}), notifier=told)
+        with self.assertRaises(HttpError):
+            self.labissues.sweep(fetch=dead, notifier=told)
+
+        self.assertEqual(len(told.sent), 2)
+
+
+class ReportSectionTest(IsolatedDataDirTest):
+    """What the weekly digest is told about the lab issue queue.
+
+    A top-level section, deliberately not routed through the per-connector slice
+    mechanism #2 proposes — that iterates `CONNECTORS`, and lab issues are not a
+    connector (ADR-0001). Routing through it would re-open that decision.
+    """
+
+    def section(self, *specs, **kw):
+        return self.labissues.report_section(issues=issues(*specs), **kw)
+
+    def rec(self, number, verdict_value="diagnosed", severity="warning", ok=True):
+        self.triagelog.record(number, {
+            "number": number, "title": f"issue {number}", "ok": ok,
+            "labelled": True, "summary": "prose",
+            "verdict": _verdict.machine_block(
+                {**VERDICT, "verdict": verdict_value, "severity": severity},
+                cost=dict(SPEND), error=None if ok else "the API is down")})
+
+    def test_it_counts_the_queue_by_verdict(self):
+        marked = [self.labissues.TRIAGED_LABEL]
+        self.rec(1, "diagnosed")
+        self.rec(2, "refuted")
+        self.rec(3, "no_fault_found")
+
+        out = self.section((1, marked, None), (2, marked, None), (3, marked, None),
+                           (4, [], None))
+
+        self.assertEqual(out["open"], 4)
+        self.assertEqual(out["untriaged"], 1)
+        self.assertEqual(out["by_verdict"],
+                         {"diagnosed": 1, "refuted": 1, "no_fault_found": 1})
+
+    def test_an_open_diagnosed_issue_is_reported_as_unresolved(self):
+        """A diagnosed issue still open is a problem somebody has been told
+        about and has not dealt with — the point of putting this in the digest."""
+        marked = [self.labissues.TRIAGED_LABEL]
+        self.rec(1, "diagnosed", "critical")
+
+        out = self.section((1, marked, None))
+
+        self.assertEqual(len(out["unresolved_diagnosed"]), 1)
+        self.assertEqual(out["unresolved_diagnosed"][0]["number"], 1)
+        self.assertEqual(out["unresolved_diagnosed"][0]["severity"], "critical")
+
+    def test_a_refuted_issue_is_not_unresolved_work(self):
+        marked = [self.labissues.TRIAGED_LABEL]
+        self.rec(1, "refuted")
+
+        self.assertEqual(self.section((1, marked, None))["unresolved_diagnosed"], [])
+
+    def test_a_long_untriaged_issue_is_the_backlog_signal(self):
+        """Automatic triage picks an issue up within a minute, so an issue still
+        untriaged a day later means triage has quietly stopped. There is no
+        notification for that — this is the only place it surfaces."""
+        old = "2020-01-01T00:00:00Z"
+
+        out = self.section((1, [], None, old), (2, [], None))
+
+        stale = [i["number"] for i in out["untriaged_too_long"]]
+        self.assertEqual(stale, [1], "an ancient untriaged issue was not flagged")
+
+    def test_the_backlog_threshold_is_measured_in_utc(self):
+        """GitHub stamps its timestamps with a `Z`. Reading them as local time
+        lands an hour out under BST — invisible everywhere except at exactly
+        this boundary, which is the only thing the number is used for."""
+        now = 1785000000.0                        # a fixed instant
+        just_under = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                   time.gmtime(now - (STALE := 24) * 3600 + 600))
+        just_over = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                  time.gmtime(now - STALE * 3600 - 600))
+
+        out = self.labissues.report_section(
+            issues=issues((1, [], None, just_under), (2, [], None, just_over)), now=now)
+
+        self.assertEqual([i["number"] for i in out["untriaged_too_long"]], [2])
+
+    def test_failed_runs_are_counted_separately_from_verdicts(self):
+        """A failed run has an `inconclusive` block by default; counting it as a
+        verdict would report the machinery breaking as the machinery working."""
+        marked = [self.labissues.TRIAGED_LABEL]
+        self.rec(1, ok=False)
+
+        out = self.section((1, marked, None))
+
+        self.assertEqual(out["failed_runs"], 1)
+        self.assertEqual(out["by_verdict"], {})
+
+    def test_an_unreadable_queue_is_reported_as_unknown_not_as_empty(self):
+        """Same rule as the page: a sweep that cannot read the repo does not
+        know the queue is empty, and the digest must not be told that it is."""
+        with self.assertRaises(HttpError):
+            self.labissues.sweep(fetch=fake(raises=HttpError(401, "nope", "", headers={})))
+
+        out = self.labissues.report_section()
+
+        self.assertIn("error", out)
+        self.assertNotIn("open", out)
 
 
 if __name__ == "__main__":

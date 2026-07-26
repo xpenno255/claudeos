@@ -18,7 +18,7 @@ import secrets
 import threading
 import time
 
-from . import ai, monitors, notify, oplog, poller, registry, smart, store
+from . import ai, labissues, monitors, notify, oplog, poller, registry, smart, store
 from .connectors import docker, homeassistant, proxmox, synology, unifi
 from .store import DATA_DIR
 
@@ -192,6 +192,10 @@ def collect() -> dict:
         {"level": e["level"], "system": e["system"], "message": e["message"]}
         for e in oplog.recent(250)
         if e.get("level") in ("warn", "error") and e.get("ts", 0) > week_ago][:60]
+
+    # A top-level section, alongside the monitors and the warnings — not a
+    # per-connector block, because lab issues are not a connector (ADR-0001).
+    data["lab_issues"] = _try(labissues.report_section)
 
     data["metric_stats_last_hour"] = _metric_stats()
     return data

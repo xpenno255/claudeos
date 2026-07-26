@@ -30,6 +30,7 @@ Two deviations from the rest of the app's outbound HTTP:
   in words.
 """
 
+import calendar
 import json
 import re
 import threading
@@ -209,6 +210,14 @@ _lock = threading.Lock()
 _cache: dict = {"issues": [], "etag": None, "checked": None, "changed": None,
                 "error": None, "backoff_until": None}
 
+# Whether the owner has already been told the credential is dead. Kept out of
+# `_cache` because it is not part of the snapshot the browser reads, and kept in
+# memory rather than on disk because it tracks a transition: a restart re-alerts,
+# which is how `poller` behaves and is the right answer for a state that is still
+# broken. Cleared by a sweep that works, so a rotated-then-revoked token alerts
+# twice — two transitions, two alerts.
+_alerted_credentials = False
+
 
 def snapshot() -> dict:
     """The current picture of the lab repo's open issues."""
@@ -258,13 +267,14 @@ def _backoff_until(e) -> float | None:
     return None
 
 
-def sweep(fetch=None) -> dict:
+def sweep(fetch=None, *, notifier=None) -> dict:
     """Refresh the cache once. Returns the resulting snapshot.
 
     `fetch(etag) -> (status, payload, headers)` is the seam: the default
     resolves the repo and token from the encrypted store and calls GitHub,
     while a caller passing its own bypasses configuration entirely.
     """
+    notifier = notifier or notify_mod.send
     if fetch is None:
         try:
             repo, token = settings()
@@ -305,6 +315,8 @@ def sweep(fetch=None) -> dict:
                                    f"until unix {int(until)}")
             else:
                 _cache["error"] = str(e)
+        if not until:
+            _tell_someone_the_token_is_dead(e, notifier)
         raise
 
     if status != 304 and not isinstance(payload, list):
@@ -334,7 +346,42 @@ def sweep(fetch=None) -> dict:
         _cache["checked"] = now
         _cache["error"] = None
         _cache["backoff_until"] = None
+    global _alerted_credentials
+    _alerted_credentials = False  # a working sweep re-arms the alert
     return snapshot()
+
+
+# Statuses that mean the credential is the problem, and it will not fix itself.
+# 404 belongs here: a private repo the token cannot see answers "not found", not
+# "forbidden", so it is the same silent stop wearing a different code. Rate
+# limits are excluded before this is reached — they are transient and the backoff
+# already handles them.
+DEAD_TOKEN_STATUSES = (401, 403, 404)
+
+
+def _tell_someone_the_token_is_dead(e, notifier) -> None:
+    """Page the owner, once per transition into a dead credential.
+
+    The one lab-issues failure that is genuinely systemic. Everything else about
+    the feature degrades visibly — the queue says the state is unknown, a failed
+    run posts a comment — but a revoked token means nothing is being triaged and
+    nothing else will ever say so. The configured token expires in July 2027, so
+    this is a certainty rather than a hypothetical.
+
+    Once per *transition*, not once per pass: the sweep runs every 60 seconds and
+    a revoked token does not heal, so alerting per pass is 1,440 pushes a day and
+    an owner who has learned to ignore them.
+    """
+    global _alerted_credentials
+    if getattr(e, "status", None) not in DEAD_TOKEN_STATUSES or _alerted_credentials:
+        return
+    _alerted_credentials = True
+    oplog.add("error", "labissues", f"lab repo unreachable with the stored token: {e}")
+    notifier(title="ClaudeOS: lab issue triage has stopped",
+             message=(f"GitHub is refusing the stored token, so no lab issue is being read "
+                      f"or triaged.\n\n{e}\n\nFix it on the Setup page; the queue will say "
+                      f"the state is unknown until you do."),
+             priority="high", tags=["rotating_light"])
 
 
 def _list_issues(repo: str, token: str, etag: str | None):
@@ -608,7 +655,7 @@ def running() -> dict:
         return dict(_run)
 
 
-def run_triage(number, **kwargs) -> dict:
+def run_triage(number, *, notifier=None, **kwargs) -> dict:
     """`triage()` with the one-run-at-a-time rule applied and the result stored.
 
     Two concurrent runs are two unattended agentic passes billed in parallel,
@@ -663,7 +710,52 @@ def run_triage(number, **kwargs) -> dict:
         # the local one costs a re-read, so this is a warning and not an error.
         oplog.add("warn", "labissues",
                   f"triage #{number}: verdict not stored locally: {type(e).__name__}: {e}")
+
+    _maybe_tell_someone(result, notifier or notify_mod.send)
     return result
+
+
+# Which verdicts are worth interrupting somebody for. Only a cause found, and
+# only where leaving it alone hurts.
+NOTIFY_VERDICTS = ("diagnosed",)
+NOTIFY_SEVERITIES = ("critical", "serious")
+
+
+def _maybe_tell_someone(result: dict, notifier) -> None:
+    """Notify on a verdict, if this is one of the few worth a push.
+
+    **Severity is the gate, and it has to be**: `notify.send` mutes repeats of an
+    identical title for five minutes, and these titles carry the issue number,
+    so no two are ever equal and the mute can never collapse them. Nothing else
+    stands between a chatty run and the owner's phone.
+
+    `default` priority, not `high`. `high` is for lab-down and failing hardware,
+    and a verdict must not arrive at that volume: the owner filed this issue
+    themselves, so they already know the thing is broken — what is new is the
+    cause, which can wait for them to look. The states that *do* page at `high`
+    are the ones nobody would otherwise find out about: a dead credential and an
+    exhausted budget, where the feature has silently stopped.
+
+    A single failed run notifies nothing. It goes to the ops log, which the
+    weekly report already sweeps, so it is reported without waking anyone.
+    """
+    block = result.get("verdict") or {}
+    if not result.get("ok") or block.get("error"):
+        return
+    if block.get("verdict") not in NOTIFY_VERDICTS:
+        return
+    if block.get("severity") not in NOTIFY_SEVERITIES:
+        return
+
+    number, severity = result.get("number"), block.get("severity")
+    remedy = (block.get("remediation") or {})
+    lead = f"{severity.upper()} · {block.get('confidence', '?')} confidence"
+    body = f"{lead}\n\n{result.get('summary') or ''}".strip()
+    if remedy.get("text"):
+        kind = "Fix" if remedy.get("kind") == "fix" else "Next step"
+        body = f"{body}\n\n{kind}: {remedy['text']}"
+    notifier(title=f"Lab issue #{number} diagnosed — {severity}",
+             message=body[:900], priority="default", tags=["mag"])
 
 
 # ------------------------------------------------------ triage without asking
@@ -917,6 +1009,99 @@ def _list_comments(repo: str, token: str, number: int) -> list:
             raise LookupError(f"no issue #{number} in {repo}") from e
         raise _explain(e, repo) from e
     return got if isinstance(got, list) else []
+
+
+# ------------------------------------------------------- the weekly report
+
+# An issue automatic triage should have picked up within a minute. Still
+# untriaged a day later means triage has quietly stopped — and there is no
+# notification for that, so this threshold is the only thing that surfaces it.
+STALE_UNTRIAGED_HOURS = 24
+
+
+def report_section(*, issues=None, records=None, now=None) -> dict:
+    """The lab issue queue as one section of the weekly snapshot.
+
+    **A top-level key, deliberately not a per-connector slice.** The mechanism
+    #2 proposes iterates `CONNECTORS`, and lab issues are not a connector
+    (ADR-0001) — routing this through it would mean re-opening that decision and
+    fabricating a `host` to do it. `reports.collect()` already keeps the uptime
+    monitors, recent warnings and metric aggregates outside the per-system
+    blocks; this sits with those.
+
+    Degrades to `{"error": ...}` like every other section, and specifically
+    **never reports an unreadable queue as an empty one** — the same rule the
+    page keeps. A digest told "no open lab issues" while the token is dead would
+    be confidently wrong about the thing it exists to summarise.
+    """
+    now = now or time.time()
+    if issues is None:
+        snap = snapshot()
+        if snap["error"] and not snap["issues"]:
+            return {"error": f"the lab repo could not be read: {snap['error']}",
+                    "queue": "unknown, not empty"}
+        issues = snap["issues"]
+    records = triagelog.summaries() if records is None else records
+
+    by_verdict: dict = {}
+    unresolved, stale, untriaged, failed = [], [], 0, 0
+    for i in issues:
+        rec = records.get(str(i.get("number"))) or {}
+        age_h = max(0.0, (now - _stamp(i.get("created_at"))) / 3600)
+        if TRIAGED_LABEL not in (i.get("labels") or []):
+            untriaged += 1
+            if age_h >= STALE_UNTRIAGED_HOURS:
+                stale.append({"number": i.get("number"), "title": i.get("title"),
+                              "days_open": round(age_h / 24, 1)})
+            continue
+        if not rec:
+            continue
+        if not rec.get("ok"):
+            # A failed run's block carries `inconclusive` by default. Counting it
+            # as a verdict would report the machinery breaking as the machinery
+            # working, which is the one thing this section must not do.
+            failed += 1
+            continue
+        value = rec.get("verdict")
+        if value:
+            by_verdict[value] = by_verdict.get(value, 0) + 1
+        if value == "diagnosed":
+            # Diagnosed and still open: a cause was found and nobody has acted.
+            unresolved.append({"number": i.get("number"), "title": i.get("title"),
+                               "severity": rec.get("severity"),
+                               "confidence": rec.get("confidence"),
+                               "days_open": round(age_h / 24, 1)})
+
+    budget = triagelog.ledger()
+    return {
+        "open": len(issues),
+        "untriaged": untriaged,
+        "by_verdict": by_verdict,
+        "failed_runs": failed,
+        "unresolved_diagnosed": sorted(
+            unresolved, key=lambda u: SEVERITY_ORDER.get(u["severity"], 9)),
+        "untriaged_too_long": stale,
+        "untriaged_threshold_hours": STALE_UNTRIAGED_HOURS,
+        "spend_today_usd": budget["usd"],
+        "budget_state": budget["state"],
+    }
+
+
+SEVERITY_ORDER = {"critical": 0, "serious": 1, "warning": 2, "info": 3}
+
+
+def _stamp(iso: str | None) -> float:
+    """A GitHub timestamp as epoch seconds, 0 when unparseable.
+
+    `calendar.timegm`, not `time.mktime`: GitHub's timestamps end in `Z` and
+    `mktime` reads a struct as *local* time, which lands an hour out under BST
+    and needs a DST-aware correction to undo. An hour of drift is invisible
+    almost everywhere and wrong exactly at the 24-hour backlog threshold.
+    """
+    try:
+        return float(calendar.timegm(time.strptime(iso or "", "%Y-%m-%dT%H:%M:%SZ")))
+    except (ValueError, TypeError):
+        return 0.0
 
 
 def start() -> None:
