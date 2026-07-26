@@ -90,6 +90,22 @@ distinguish them. `BLOCK_VERSION` is its compatibility clock.
 
 _Avoid_: "the JSON", "the payload". The block is a named thing with a version.
 
+### Triage record
+
+**The local copy of what a triage run concluded**, one per lab issue, in
+`data/triage.json` (`app/triagelog.py`). Last write wins: it answers *what is
+this issue's current verdict*, so a re-triage replaces the earlier answer.
+
+**GitHub is the source of truth, not this.** The verdict a human reads is the
+comment; the record exists so the queue can show a verdict without re-reading
+the tracker. A `data/` wipe is allowed to destroy it, and a lab issue carrying
+the triaged label with no record renders as *triaged, verdict not held locally*
+— never as untriaged, which would offer a trigger and spend again.
+
+_Avoid_ treating it as a spend ledger. Last-write-wins loses the cost of a
+replaced run by design; the daily budget ledger is a different question and gets
+its own key in the same file.
+
 ### Read-only
 
 In the context of triage, **read-only always means against the lab** —

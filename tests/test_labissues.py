@@ -16,6 +16,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -25,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import labissues as _labissues  # noqa: E402
 from app import oplog as _oplog  # noqa: E402
 from app import store as _store  # noqa: E402
+from app import triagelog as _triagelog  # noqa: E402
 from app import verdict as _verdict  # noqa: E402
 from app import tools as _tools  # noqa: E402
 from app.httpclient import HttpError  # noqa: E402
@@ -188,6 +190,7 @@ class IsolatedDataDirTest(unittest.TestCase):
         os.environ["CLAUDEOS_DATA"] = self.tmp
         self.store = importlib.reload(_store)
         importlib.reload(_oplog)
+        self.triagelog = importlib.reload(_triagelog)
         self.labissues = importlib.reload(_labissues)
         self.tracker = Tracker()
 
@@ -649,6 +652,137 @@ class TriageRunTest(IsolatedDataDirTest):
         self.assertEqual(self.tracker.labelled, [1], "a dead API left the issue unmarked")
         self.assertEqual(
             _verdict.parse_verdict(self.tracker.body)["verdict"], "inconclusive")
+
+
+class RunTriageTest(IsolatedDataDirTest):
+    """`run_triage()` — the composition every caller wants around `triage()`:
+    one run at a time, and the verdict kept where the queue can read it.
+
+    Both halves are here rather than in `triage()` because that function's
+    contract says the caller owns concurrency and selection — the automatic
+    sweep in #36 will want the same composition, and writing it twice is how the
+    two would drift.
+    """
+
+    def dispatch(self, **kw):
+        kw.setdefault("issue", ISSUE)
+        kw.setdefault("analyse", analysis())
+        kw.setdefault("comment", self.tracker.comment)
+        kw.setdefault("label", self.tracker.label)
+        return self.labissues.run_triage(kw.pop("number", 1), **kw)
+
+    # ------------------------------------------------------------ the record
+
+    def test_a_finished_run_is_readable_as_a_queue_summary(self):
+        """Without this the queue can only show that a label exists — "somebody
+        looked" — and has to re-read GitHub to recover a verdict this process
+        produced itself a minute earlier."""
+        self.dispatch()
+
+        summary = self.triagelog.summaries()["1"]
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["verdict"], "refuted")
+        self.assertEqual(summary["severity"], "warning")
+        self.assertEqual(summary["confidence"], "medium")
+        self.assertEqual(summary["refuted"], len(VERDICT["refuted"]))
+        self.assertEqual(summary["usd"], SPEND["usd"])
+
+    def test_a_failed_run_is_recorded_as_well(self):
+        """"The machinery broke" is a state the queue has to render, and it is
+        not "nobody has looked". Recording only successes would leave a failed
+        run looking untriaged, under a live trigger button that spends again."""
+        self.dispatch(analyse=analysis(raises=self.labissues.TriageFailed("the API is down")))
+
+        summary = self.triagelog.summaries()["1"]
+        self.assertFalse(summary["ok"])
+        self.assertIn("the API is down", summary["error"])
+
+    def test_a_verdict_posted_without_its_label_is_visible_in_the_summary(self):
+        """An unmarked issue is eligible again, so it will be re-triaged and
+        re-paid for. That cannot be a detail only the ops log knows."""
+        tracker = Tracker(label_raises=ConnectionError("403"))
+
+        self.dispatch(comment=tracker.comment, label=tracker.label)
+
+        self.assertIs(self.triagelog.summaries()["1"]["labelled"], False)
+
+    def test_re_triaging_replaces_the_earlier_record(self):
+        """Removing the label is the documented way to ask for another look, and
+        what the queue must then show is the new answer, not the old one."""
+        self.dispatch()
+        self.dispatch(analyse=analysis({**VERDICT, "verdict": "diagnosed",
+                                        "severity": "critical"}))
+
+        self.assertEqual(self.triagelog.summaries()["1"]["verdict"], "diagnosed")
+        self.assertEqual(len(self.triagelog.summaries()), 1)
+
+    def test_the_summary_leaves_the_evidence_behind(self):
+        """The queue polls every 30 seconds and one record can carry kilobytes
+        of evidence notes. A row renders a verdict, a severity and a count."""
+        self.dispatch()
+
+        self.assertNotIn("evidence", self.triagelog.summaries()["1"])
+        self.assertEqual(len(self.triagelog.get(1)["verdict"]["evidence"]),
+                         len(VERDICT["evidence"]),
+                         "the full record must keep what the summary drops")
+
+    def test_an_unreadable_record_file_does_not_take_the_queue_down(self):
+        """These records are a convenience; GitHub holds the real verdict. A
+        half-written file costs a re-read, and must not stop the page loading."""
+        with open(self.triagelog.PATH, "w", encoding="utf-8") as f:
+            f.write('{"runs": {"1": ')      # truncated mid-write
+
+        self.assertEqual(self.triagelog.summaries(), {})
+        self.dispatch()
+        self.assertEqual(self.triagelog.summaries()["1"]["verdict"], "refuted")
+
+    # ------------------------------------------------------------- the slot
+
+    def test_a_second_run_is_refused_while_one_is_in_flight(self):
+        """Two concurrent runs are two unattended agentic passes billed in
+        parallel, against a lab one of them may be misreading because the other
+        is mid-investigation. The refusal is what the queue turns into a
+        waiting row."""
+        started, release, done = threading.Event(), threading.Event(), []
+
+        def slow(issue):
+            started.set()
+            release.wait(5)
+            return dict(VERDICT), dict(SPEND)
+
+        first = threading.Thread(target=lambda: done.append(self.dispatch(analyse=slow)))
+        first.start()
+        try:
+            self.assertTrue(started.wait(5), "the first run never started")
+            self.assertEqual(self.labissues.running()["number"], 1,
+                             "the run in flight must be nameable, for the other tab")
+
+            second = Tracker()
+            with self.assertRaises(ValueError) as caught:
+                self.dispatch(number=2, issue={**ISSUE, "number": 2},
+                              comment=second.comment, label=second.label)
+
+            self.assertIn("already in progress", str(caught.exception))
+            self.assertEqual(second.comments, [], "the refused run still posted a comment")
+            self.assertEqual(second.labelled, [], "the refused run still marked an issue")
+            self.assertNotIn("2", self.triagelog.summaries(),
+                             "a run that never happened must not leave a record")
+        finally:
+            release.set()
+            first.join(5)
+
+        self.assertTrue(done and done[0]["ok"])
+        self.assertIsNone(self.labissues.running()["number"],
+                          "the slot was not released after the run")
+
+    def test_the_slot_is_released_when_a_run_raises(self):
+        """A precondition that fails part-way must not wedge triage for the life
+        of the process — the next attempt has to be able to start."""
+        with self.assertRaises(LookupError):
+            self.dispatch(issue=None, comment=None, label=None)   # unconfigured
+
+        self.assertIsNone(self.labissues.running()["number"])
+        self.assertTrue(self.dispatch()["ok"], "the slot stayed held after a failure")
 
 
 if __name__ == "__main__":

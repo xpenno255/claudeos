@@ -24,7 +24,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from app import (ai, chat, labissues, monitors, notify, oplog, poller, registry, reports,
-                 scanner, smart, store)
+                 scanner, smart, store, triagelog)
 from app.connectors import CONNECTORS, docker, homeassistant, proxmox, synology, unifi
 from app.httpclient import HttpError
 
@@ -106,20 +106,24 @@ def route_system_test(_m, p, _b):
 
 def route_lab_issues(_m, _p, _b):
     # triage_available rides along so the UI can state the precondition up front
-    # rather than offering a control that answers 404.
+    # rather than offering a control that answers 404. `triage` and
+    # `triage_running` are what let a row show a verdict rather than just the
+    # label, and show it in every open tab rather than only the one that asked.
     return {**labissues.snapshot(), "triage_available": labissues.HAS_SDK,
-            "triage_label": labissues.TRIAGED_LABEL, "model": labissues.MODEL}
+            "triage_label": labissues.TRIAGED_LABEL, "model": labissues.MODEL,
+            "triage_running": labissues.running(), "triage": triagelog.summaries()}
 
 
 def route_lab_triage(_m, p, _b):
     """Triage one lab issue, on demand.
 
     Synchronous, like the weekly report's run-now: a run takes minutes, and the
-    caller is a human who asked for this one issue. labissues.triage reports a
-    failed run rather than raising it — the issue is marked either way — so a
-    non-2xx here means it never started (no SDK, no credentials, no such issue).
+    caller is a human who asked for this one issue. labissues.run_triage reports
+    a failed run rather than raising it — the issue is marked either way — so a
+    non-2xx here means it never started (no SDK, no credentials, no such issue,
+    or another run already holds the slot).
     """
-    return labissues.triage(p["number"])
+    return labissues.run_triage(p["number"])
 
 
 def route_poll_now(_m, _p, _b):

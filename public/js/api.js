@@ -82,4 +82,5 @@ export const api = {
   haZhaInsights:   ()            => call("POST",   "/api/ha/zha-insights"),
 
   labIssues:       ()            => call("GET",    "/api/labissues"),
+  labTriage:       (n)           => call("POST",   `/api/labissues/${n}/triage`),
 };

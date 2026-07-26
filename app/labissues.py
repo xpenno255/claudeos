@@ -35,7 +35,7 @@ import re
 import threading
 import time
 
-from . import oplog, store, sweeper, verdict, toolloop, tools
+from . import oplog, store, sweeper, triagelog, verdict, toolloop, tools
 from .httpclient import HttpError, request
 
 API_BASE = "https://api.github.com"
@@ -577,6 +577,73 @@ def _add_labels(repo: str, token: str, number: int, names: list) -> list:
                      {"labels": list(names)})
     except HttpError as e:
         raise _explain(e, repo) from e
+
+
+# ------------------------------------------------------- one run at a time
+
+# `triage()` deliberately owns neither concurrency nor the local record — its
+# docstring says the caller decides both, because the automatic sweep (#36) has
+# to. But every caller wants the same two things around it, so the composition
+# lives here rather than being written twice and drifting.
+#
+# The slot is held for the whole run, which is minutes; `_run` is guarded
+# separately so `running()` answers immediately instead of blocking behind it.
+_slot = threading.Lock()
+_run_lock = threading.Lock()
+_run: dict = {"number": None, "since": None}
+
+
+def running() -> dict:
+    """Which issue is being triaged right now, if any.
+
+    Read by the queue view, so a second browser tab shows the row as running
+    rather than as untriaged with a live trigger button.
+    """
+    with _run_lock:
+        return dict(_run)
+
+
+def run_triage(number, **kwargs) -> dict:
+    """`triage()` with the one-run-at-a-time rule applied and the result stored.
+
+    Two concurrent runs are two unattended agentic passes billed in parallel,
+    against a lab whose state one of them may be misreading because the other is
+    mid-investigation. Refusing the second is cheaper than either.
+
+    Refuses rather than queues: the caller knows whether waiting makes sense.
+    The queue view queues client-side, and #36's sweep will simply try again on
+    its next pass.
+    """
+    # Coerced up front, before the slot is taken: the route hands over a string
+    # captured from the URL, and `running()` is compared against a row's issue
+    # number in the view, where "12" and 12 are not the same row.
+    try:
+        number = int(number)
+    except (TypeError, ValueError):
+        raise ValueError(f"issue number must be a number — got {number!r}") from None
+
+    if not _slot.acquire(blocking=False):
+        raise ValueError(f"a triage run is already in progress (issue "
+                         f"#{running()['number']}) — runs are one at a time, so the "
+                         f"lab is not being read by two investigations at once")
+    with _run_lock:
+        _run.update(number=number, since=time.time())
+
+    try:
+        result = triage(number, **kwargs)
+    finally:
+        with _run_lock:
+            _run.update(number=None, since=None)
+        _slot.release()
+
+    try:
+        triagelog.record(number, result)
+    except Exception as e:  # noqa: BLE001 — the run happened; the record is a convenience
+        # GitHub already has the verdict, which is the copy that matters. Losing
+        # the local one costs a re-read, so this is a warning and not an error.
+        oplog.add("warn", "labissues",
+                  f"triage #{number}: verdict not stored locally: {type(e).__name__}: {e}")
+    return result
 
 
 def start() -> None:
