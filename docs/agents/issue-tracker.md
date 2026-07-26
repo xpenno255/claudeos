@@ -13,6 +13,43 @@ Issues and PRDs for this repo live as GitHub issues. Use the `gh` CLI for all op
 
 Infer the repo from `git remote -v` — `gh` does this automatically when run inside a clone.
 
+## Triage roles → label strings
+
+`/triage` works in canonical role names and needs the mapping to this repo's actual
+labels. Here they are identical, so there is nothing to translate:
+
+| Canonical role | Label | Meaning |
+| --- | --- | --- |
+| `bug` | `bug` | Something is broken |
+| `enhancement` | `enhancement` | New feature or improvement |
+| `needs-triage` | `needs-triage` | Not yet evaluated — waiting on the maintainer |
+| `needs-info` | `needs-info` | Waiting on the reporter for more information |
+| `ready-for-agent` | `ready-for-agent` | Triaged and specified — an agent can pick this up |
+| `ready-for-human` | `ready-for-human` | Triaged and specified — needs a human, not an agent |
+| `wontfix` | `wontfix` | Will not be actioned |
+
+A triaged issue carries **exactly one category** (`bug` / `enhancement`) and
+**exactly one state**. Conflicting state labels are a bug in the triage, not a
+valid combination — flag it rather than guessing which one is stale.
+
+`wayfinder:*` labels are a separate axis and are not triage states. They mark a
+wayfinder map and its child tickets; see the wayfinding section below.
+
+## Rejected requests: `.out-of-scope/`
+
+`.out-of-scope/*.md` is the record of **enhancements this repo has decided not to
+build** — one file per concept, not per issue, so several requests for the same
+thing group under one file. Read the directory before triaging anything new: a
+request that matches a prior rejection should surface that decision rather than
+re-litigate it, and matching is by concept, not keyword.
+
+Write here only when an enhancement is *rejected*. Something closed because it is
+**already implemented** does not belong — that is a built feature, and recording it
+as a rejection poisons the deduplication check. Point at where it lives instead.
+
+If a decision is reconsidered, delete the file. Closed issues stay closed; they
+are the historical record.
+
 ## Pull requests as a triage surface
 
 **PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_
