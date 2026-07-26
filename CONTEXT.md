@@ -170,6 +170,25 @@ incident. Each stop is explained as itself (`labissues._stopped_because`), becau
 sending someone to re-mint a working token when the repo was renamed is worse than
 saying nothing.
 
+### Nowhere to go
+
+**An alert raised while no notification channel is configured** — not a delivery
+failure, because nothing was attempted and nothing can be retried. The third
+outcome of a fan-out beside sent and failed (`notify.alerting_gap`).
+
+**Configuring no channel is a valid choice, so it is not warned about; losing an
+alert is not, so it is.** The distinction is what the app says and when: an
+install that never notifies is left alone, and the count and the dashboard banner
+appear only once something has actually been discarded. This is the same rule as
+everywhere else here — interrupt for a feature that has silently stopped working,
+not for one that was never asked to start.
+
+Each drop is an ops-log line, which is the audit record; the count exists because
+the ops log is where somebody looks *after* they suspect something, and an
+install that has never notified is not a state anybody thinks to suspect. Drops
+are forgotten once an alert gets through, since they then describe a
+configuration that no longer exists.
+
 ### Untriaged too long
 
 **An open lab issue still carrying no verdict 24 hours after it was raised**

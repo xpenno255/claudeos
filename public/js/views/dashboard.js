@@ -2,7 +2,7 @@
 // health, container states and the live ops log.
 
 import { api } from "../api.js";
-import { el, fmtBytes, fmtPct, fmtUptime, clockTime } from "../util.js";
+import { el, fmtBytes, fmtPct, fmtUptime, clockTime, timeAgo } from "../util.js";
 import { sparkline, meter } from "../charts.js";
 import { SYSTEMS, BY_ID } from "../meta.js";
 
@@ -18,6 +18,10 @@ export async function renderDashboard(root) {
 
     const anyConfigured = Object.values(overview.config || {}).some(c => c.configured);
     root.replaceChildren();
+
+    // Above the hero as well as the tiles: an alert can only have been lost if
+    // something was linked when it fired, and unlinking it does not un-lose it.
+    if (overview.alerting_gap) root.append(alertingGap(overview.alerting_gap));
 
     if (!anyConfigured) {
       root.append(hero());
@@ -48,6 +52,21 @@ function hero() {
     el("div", { class: "glyph" }, "◈"),
     el("h2", { class: "blink-cursor" }, "NO SYSTEMS LINKED"),
     el("p", {}, "ClaudeOS has nothing to watch yet. Head to Setup and link your UniFi console, Proxmox host, Docker engine and Home Assistant — credentials are encrypted at rest and never leave this machine."),
+    el("a", { href: "#/setup" }, el("button", { class: "btn" }, "▸ OPEN SETUP")));
+}
+
+// Shown only once an alert has actually been discarded, so it names what was
+// lost rather than warning about what might be.
+function alertingGap(gap) {
+  const n = gap.count;
+  const last = gap.last_title
+    ? `Most recent: “${gap.last_title}” ${timeAgo(gap.last_ts)}.`
+    : "";
+  return el("div", { class: "panel banner-alert" },
+    el("div", { class: "glyph" }, "⚠"),
+    el("div", { class: "banner-body" },
+      el("h3", {}, `${n} ALERT${n === 1 ? "" : "S"} HAD NOWHERE TO GO`),
+      el("p", {}, `No notification channel is configured, so ${n === 1 ? "it was" : "they were"} discarded. ${last}`)),
     el("a", { href: "#/setup" }, el("button", { class: "btn" }, "▸ OPEN SETUP")));
 }
 

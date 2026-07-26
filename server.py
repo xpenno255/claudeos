@@ -48,8 +48,10 @@ def _async_poll() -> None:
 # ---------------------------------------------------------------- routes
 
 def route_overview(_m, _p, _b):
+    # alerting_gap is null unless alerts have actually been discarded for want of
+    # a channel, so the dashboard can render it unconditionally.
     return {"systems": poller.snapshot(), "config": store.public_summary(),
-            "labels": SYSTEM_LABELS}
+            "labels": SYSTEM_LABELS, "alerting_gap": notify.alerting_gap()}
 
 
 def route_history(_m, _p, _b):
