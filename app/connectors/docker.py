@@ -167,6 +167,23 @@ def summary(settings: dict) -> dict:
     }
 
 
+def metrics(summary: dict) -> dict:
+    """Sparkline series. Host vitals and GPU come from Glances, which is
+    optional and allowed to be down — `summary` carries `host: None` in that
+    case, and the resulting `None`s are dropped rather than charted as zero."""
+    host = summary.get("host") or {}
+    gpus = host.get("gpus") or []
+    return {
+        "running": summary.get("containers_running"),
+        "exited": summary.get("containers_exited"),
+        "host_cpu_pct": host.get("cpu_pct"),
+        "host_mem_pct": host.get("mem_pct"),
+        # first GPU only: the chart has one line, and a second card is rare
+        "gpu_util_pct": gpus[0].get("util_pct") if gpus else None,
+        "gpu_vram_pct": gpus[0].get("mem_pct") if gpus else None,
+    }
+
+
 def storage_report(settings: dict) -> dict:
     """docker system df equivalent: what's eating the docker disk.
     Needs SYSTEM: 1 on the socket-proxy for /system/df."""

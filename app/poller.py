@@ -1,8 +1,13 @@
 """Background poller.
 
 Every POLL_INTERVAL seconds, pull a summary from each configured system,
-cache the latest snapshot, and append key metrics to per-system ring
-buffers so the dashboard can draw sparklines without hammering the lab.
+cache the latest snapshot, and append that connector's chosen metrics to
+per-system ring buffers so the dashboard can draw sparklines without
+hammering the lab.
+
+*Which* metrics is the connector's business, not this module's: it calls
+`mod.metrics(summary)` and records whatever comes back. The poller therefore
+knows no summary shapes at all, and a new system needs nothing here.
 """
 
 import threading
@@ -29,50 +34,6 @@ def _record(system_id: str, metrics: dict) -> None:
         hist.setdefault(k, deque(maxlen=HISTORY_LEN)).append((ts, v))
 
 
-def _metrics_from_summary(system_id: str, s: dict) -> dict:
-    if system_id == "unifi":
-        return {
-            "clients": s.get("clients"),
-            "latency_ms": s.get("isp_latency_ms"),
-            "wan_rx_bps": s.get("rx_bytes_r"),
-            "wan_tx_bps": s.get("tx_bytes_r"),
-        }
-    if system_id == "proxmox":
-        mem_pct = None
-        if s.get("mem_total"):
-            mem_pct = 100.0 * s["mem_used"] / s["mem_total"]
-        cpu = s.get("cpu_avg")
-        return {
-            "cpu_pct": round(cpu * 100, 1) if cpu is not None else None,
-            "mem_pct": round(mem_pct, 1) if mem_pct is not None else None,
-            "guests_running": s.get("guests_running"),
-        }
-    if system_id == "docker":
-        host = s.get("host") or {}
-        gpus = host.get("gpus") or []
-        return {
-            "running": s.get("containers_running"),
-            "exited": s.get("containers_exited"),
-            "host_cpu_pct": host.get("cpu_pct"),
-            "host_mem_pct": host.get("mem_pct"),
-            "gpu_util_pct": gpus[0].get("util_pct") if gpus else None,
-            "gpu_vram_pct": gpus[0].get("mem_pct") if gpus else None,
-        }
-    if system_id == "homeassistant":
-        return {
-            "entities": s.get("entities_total"),
-            "unavailable": s.get("unavailable"),
-            "lights_on": s.get("lights_on"),
-        }
-    if system_id == "synology":
-        return {
-            "cpu_pct": s.get("cpu_pct"),
-            "mem_pct": s.get("mem_pct"),
-            "vol_pct": s.get("vol_pct"),
-        }
-    return {}
-
-
 def poll_once() -> None:
     for system_id, mod in CONNECTORS.items():
         settings = store.get_system(system_id, reveal_secrets=True)
@@ -86,7 +47,7 @@ def poll_once() -> None:
             s = mod.summary(settings)
             with _lock:
                 _latest[system_id] = {"ok": True, "ts": time.time(), "data": s}
-                _record(system_id, _metrics_from_summary(system_id, s))
+                _record(system_id, mod.metrics(s))
             if was_ok is False:
                 oplog.add("info", system_id, "connection recovered")
                 notify.send(f"{label} recovered", "polling succeeded again",

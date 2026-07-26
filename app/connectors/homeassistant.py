@@ -76,6 +76,16 @@ def summary(settings: dict) -> dict:
     }
 
 
+def metrics(summary: dict) -> dict:
+    """Sparkline series. `unavailable` is the one worth watching over time — a
+    rising count is usually a radio or an integration failing, not a device."""
+    return {
+        "entities": summary.get("entities_total"),
+        "unavailable": summary.get("unavailable"),
+        "lights_on": summary.get("lights_on"),
+    }
+
+
 def system_info(settings: dict) -> dict:
     """HAOS internals via the supervisor proxy: core CPU/RAM, host disk,
     and add-on states. Needs an admin user's long-lived token."""
