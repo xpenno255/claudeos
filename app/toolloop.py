@@ -36,6 +36,7 @@ would have to parse.
 
 import datetime
 import json
+import time
 
 from . import store, tools
 
@@ -182,7 +183,8 @@ def tool_result(tool_use_id: str, env: dict) -> dict:
 def run(client, messages: list, *, schemas: list, system: list,
         approval=None, model: str = MODEL, max_tokens: int = MAX_TOKENS,
         effort: str = EFFORT, max_iterations: int = MAX_ITERATIONS,
-        context_budget: int = CONTEXT_BUDGET, final_schema: dict | None = None):
+        context_budget: int = CONTEXT_BUDGET, final_schema: dict | None = None,
+        max_seconds: float | None = None):
     """Drive the tool loop over `messages`, yielding (event, payload) pairs.
 
     `messages` is appended to in place, so the caller keeps the transcript it
@@ -210,7 +212,9 @@ def run(client, messages: list, *, schemas: list, system: list,
     fired and the run stopped mid-turn; the caller resumes by calling run again
     with the tool_result blocks appended to `messages`.
     """
+    started = time.monotonic()
     run_cost, run_tools, usage_last, failure = 0.0, 0, None, None
+    run_output = 0   # summed: usage_last holds only the final reply's count
     structured, ending = None, False
     # Duplicate-call guard is per RUN, not per conversation: a follow-up
     # "check again now" must be able to re-run the same query.
@@ -250,6 +254,7 @@ def run(client, messages: list, *, schemas: list, system: list,
 
         usage_last = reply.usage
         run_cost += cost(reply.usage)
+        run_output += getattr(reply.usage, "output_tokens", 0) or 0
         messages.append({"role": "assistant", "content": blocks(reply)})
 
         if reply.stop_reason == "refusal":
@@ -257,7 +262,10 @@ def run(client, messages: list, *, schemas: list, system: list,
             yield "error", {"message": failure}
             break
         if reply.stop_reason != "tool_use":
-            if reply.stop_reason == "max_tokens":
+            truncated = reply.stop_reason == "max_tokens"
+            if truncated and (final_schema is None or ending):
+                # Nothing left to try: either the caller wanted prose, or this
+                # WAS the structured call and it still came back cut short.
                 failure = "the reply hit the token cap and was cut short"
                 yield "error", {"message": failure}
             if final_schema is not None and failure is None:
@@ -270,6 +278,11 @@ def run(client, messages: list, *, schemas: list, system: list,
                     # ceiling — the ordinary way a run ends. In this mode that
                     # is not the ending: one more call, without tools, turns
                     # what it concluded into the data the caller asked for.
+                    #
+                    # A truncated reply still gets this call. Its prose was cut
+                    # short, but the evidence is already in the transcript and
+                    # the structured call is cheap; dying here would throw away
+                    # a whole run's tool results over a clipped summary.
                     ending = True
                     messages.append({"role": "user", "content": FINAL_PROMPT})
                     continue
@@ -286,6 +299,16 @@ def run(client, messages: list, *, schemas: list, system: list,
         # caller persisting it must refuse to resume it, which chat.run_turn
         # does by asking budget_reached() the same question with the same
         # threshold. Keep those two in lockstep or resuming crashes.
+        # Wall-clock, same placement and same reasoning as the budget check: a
+        # slow or hanging connector can burn an unattended run's time without
+        # ever tripping an iteration or token ceiling. Checked between rounds,
+        # so an in-flight call is never abandoned mid-request.
+        if max_seconds is not None and time.monotonic() - started >= max_seconds:
+            failure = (f"stopped before the next tool call: this run has used its "
+                       f"{max_seconds:g}s time budget")
+            yield "error", {"message": failure}
+            break
+
         used = prompt_tokens(reply.usage)
         if budget_reached(used, context_budget):
             failure = (f"stopped before the next tool call: this run has used its "
@@ -337,13 +360,15 @@ def run(client, messages: list, *, schemas: list, system: list,
 
         if pending:
             yield "suspended", {"cost": run_cost, "tools": run_tools,
-                                "usage": usage_last, "error": failure,
+                                "usage": usage_last, "output_tokens": run_output,
+                                "error": failure,
                                 "structured": structured}
             return
 
         messages.append({"role": "user", "content": results})
 
     yield "finished", {"cost": run_cost, "tools": run_tools, "usage": usage_last,
+                       "output_tokens": run_output,
                        "error": failure, "structured": structured}
 
 

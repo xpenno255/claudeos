@@ -35,7 +35,7 @@ import re
 import threading
 import time
 
-from . import oplog, store, sweeper, toolloop, tools
+from . import oplog, store, sweeper, verdict, toolloop, tools
 from .httpclient import HttpError, request
 
 API_BASE = "https://api.github.com"
@@ -56,11 +56,10 @@ HAS_SDK = toolloop.HAS_SDK
 MODEL = toolloop.MODEL
 
 TRIAGED_LABEL = "claudeos:triaged"
-MARKER = "claudeos-triage"
-BLOCK_VERSION = 1
 # Lower than chat's 15: a triage run is unattended, so nobody is watching the
 # spend. The daily ledger that bounds it across runs is a separate concern.
 TRIAGE_ITERATIONS = 10
+TRIAGE_SECONDS = 300        # wall clock: nobody is watching an unattended run
 
 # Closed vocabularies. Four verdicts because a refuted hypothesis is a useful
 # result rather than a failure, and "looked, found nothing" is not the same
@@ -68,13 +67,8 @@ TRIAGE_ITERATIONS = 10
 # success, no_data and truncated, and a single figure at the top would have
 # hidden that a key field came back empty. `excluded` names evidence
 # deliberately not used, with its reason.
-VERDICTS = ("diagnosed", "refuted", "inconclusive", "no_fault_found")
-CONFIDENCES = ("low", "medium", "high")
-SEVERITIES = ("critical", "serious", "warning", "info")
-EVIDENCE_STATUSES = ("success", "no_data", "truncated", "excluded")
 # A kind, because the honest output of a real run was a diagnostic and not a
 # repair — a shape that assumes a fix will have one manufactured for it.
-REMEDIATION_KINDS = ("fix", "diagnostic", "none")
 
 
 def _hdr(hdrs, name: str) -> str:
@@ -375,83 +369,7 @@ def _list_issues(repo: str, token: str, etag: str | None):
     return 200, payload, hdrs
 
 
-# ----------------------------------------------------------------- the verdict
-
-TRIAGE_TAIL = """## Your job
-
-You are triaging one issue from this homelab's issue tracker, raised by the person who owns the lab. You are working unattended: there is nobody to ask a question of, and nothing you say reaches them until you finish.
-
-Work out what is actually wrong. Form hypotheses, then use the tools to test them against the lab's real state. Name the hypotheses you rule out — a hypothesis you can eliminate is a useful result, not a failure, and it saves the owner from checking it themselves.
-
-Your tools are read-only. You cannot change anything, restart anything or apply a fix, and you must not claim to have done so. Nor can you ask for permission: if the only way forward is a change, the honest answer is a diagnostic — the exact next step for a human to take.
-
-Stop when the evidence stops paying for itself. An issue you cannot settle is a real outcome; say what you checked, what you found, and what would settle it.
-
-## Your answer
-
-Your final answer is a structured record. The fields:
-
-- `summary` — the comment a human reads on the issue. Markdown prose, addressed to the lab's owner. Lead with the answer, then the evidence for it, then what to do next. Quote what you actually saw. Hedge anything you did not directly confirm, and say plainly which areas went unverified and why.
-- `verdict` — `diagnosed` when you have identified the cause. `refuted` when the issue's own stated cause is wrong, whether or not you found the real one. `no_fault_found` when you looked where the issue points and everything there is healthy. `inconclusive` when you could not tell.
-- `confidence` — in the verdict, not in the lab.
-- `severity` — the impact on the home if this is left alone, not how interesting it is.
-- `refuted` — each hypothesis you ruled out, named in a short phrase.
-- `evidence` — one entry per finding that carries weight, with the tool it came from and that result's own status: `success`, `no_data` (the query worked and found nothing — never report this as healthy), `truncated` (you saw part of it), or `excluded` for something you looked at and deliberately did not rely on, with the reason in the note.
-- `remediation` — `kind` is `fix` for a change that resolves it, `diagnostic` for the next step that would narrow it down, `none` when there is nothing to do. `text` is what a human should actually do, specific enough to follow. ClaudeOS never runs it; a person reads it and decides."""
-
-TRIAGE_PROMPT = f"{toolloop.BASE_PROMPT}\n\n{TRIAGE_TAIL}"
-
-# The shape asked of the model. Deliberately not the same shape as the machine
-# block: `summary` is prose for the comment and never goes in the block, and
-# `executable` is absent because ClaudeOS stamps it — the model does not get to
-# say whether this app will run something.
-VERDICT_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["summary", "verdict", "confidence", "severity", "refuted",
-                 "evidence", "remediation"],
-    "properties": {
-        "summary": {"type": "string",
-                    "description": "Markdown prose for the lab's owner, posted as the "
-                                   "issue comment. Answer first, then the evidence."},
-        "verdict": {"type": "string", "enum": list(VERDICTS)},
-        "confidence": {"type": "string", "enum": list(CONFIDENCES)},
-        "severity": {"type": "string", "enum": list(SEVERITIES)},
-        "refuted": {"type": "array", "items": {"type": "string"},
-                    "description": "Each hypothesis ruled out, as a short named phrase."},
-        "evidence": {
-            "type": "array",
-            "description": "One entry per finding that carries weight.",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["tool", "status", "note"],
-                "properties": {
-                    "tool": {"type": "string",
-                             "description": "The tool this finding came from."},
-                    "status": {"type": "string", "enum": list(EVIDENCE_STATUSES)},
-                    "note": {"type": "string",
-                             "description": "What it showed. For `excluded`, why it "
-                                            "was not relied on."},
-                },
-            },
-        },
-        "remediation": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["kind", "text"],
-            "properties": {
-                "kind": {"type": "string", "enum": list(REMEDIATION_KINDS)},
-                "text": {"type": "string",
-                         "description": "What a human should do. Empty when kind is "
-                                        "`none`."},
-            },
-        },
-    },
-}
-
-_BLOCK_RE = re.compile(r"<!--\s*" + re.escape(MARKER) + r"\s*(.*?)-->", re.DOTALL)
-
+# --------------------------------------------------------------- the triage run
 
 class TriageFailed(Exception):
     """A run that died part-way, carrying what it had already spent.
@@ -463,90 +381,8 @@ class TriageFailed(Exception):
 
     def __init__(self, message: str, spend: dict | None = None):
         super().__init__(message)
-        self.spend = spend or _spend(None)
+        self.spend = spend or verdict.normalised_cost(None)
 
-
-def _spend(cost) -> dict:
-    c = cost if isinstance(cost, dict) else {}
-    return {"input": int(c.get("input") or 0),
-            "output": int(c.get("output") or 0),
-            "usd": round(float(c.get("usd") or 0.0), 6)}
-
-
-def _one_of(value, allowed: tuple, fallback: str) -> str:
-    return value if value in allowed else fallback
-
-
-def machine_block(result: dict | None, *, cost=None, error: str | None = None) -> dict:
-    """A verdict reduced to exactly the fields the hidden block carries.
-
-    Built field by field rather than passed through, because the vocabularies
-    are closed and the source is a language model: an invented verdict value or
-    an extra key would reach the UI that parses this. Anything unrecognised
-    lands on the cautious end — an unknown verdict is `inconclusive`, not a
-    diagnosis.
-
-    `executable` is stamped here, always false. The remediation is text and
-    ClaudeOS does not run it, so that is not the model's claim to make.
-    """
-    r = result if isinstance(result, dict) else {}
-    rem = r.get("remediation") if isinstance(r.get("remediation"), dict) else {}
-    block = {
-        "v": BLOCK_VERSION,
-        "verdict": _one_of(r.get("verdict"), VERDICTS, "inconclusive"),
-        "confidence": _one_of(r.get("confidence"), CONFIDENCES, "low"),
-        "severity": _one_of(r.get("severity"), SEVERITIES, "info"),
-        "refuted": [str(h).strip() for h in (r.get("refuted") or [])
-                    if str(h).strip()],
-        "evidence": [{"tool": str(e.get("tool") or "?"),
-                      "status": _one_of(e.get("status"), EVIDENCE_STATUSES, "excluded"),
-                      "note": str(e.get("note") or "")}
-                     for e in (r.get("evidence") or []) if isinstance(e, dict)],
-        "remediation": {"kind": _one_of(rem.get("kind"), REMEDIATION_KINDS, "none"),
-                        "text": str(rem.get("text") or ""),
-                        "executable": False},
-        "cost": _spend(cost),
-    }
-    if error:
-        # Only on the failure path. A block with an error and an `inconclusive`
-        # verdict is how a failed run explains itself to whatever reads it back.
-        block["error"] = str(error)
-    return block
-
-
-def comment_body(block: dict, prose: str) -> str:
-    """The comment as posted: prose a human reads, then a block they never see.
-
-    GitHub renders an HTML comment invisibly, so one comment serves both
-    readers. The escape matters — a note containing `-->` would otherwise close
-    the comment early and spill JSON onto the issue; as `\\u003e` it still
-    parses back to the same string.
-    """
-    payload = json.dumps(block, indent=1, sort_keys=True).replace("-->", "--\\u003e")
-    return f"{prose.strip()}\n\n<!-- {MARKER}\n{payload}\n-->\n"
-
-
-def parse_verdict(body: str | None) -> dict | None:
-    """The machine block in a comment, or None when there is not a usable one.
-
-    Degrades instead of raising. A comment with no block is the normal case —
-    humans write most of them — and a block that will not parse is a comment
-    from an older ClaudeOS or a truncated write. Either is a fact the caller can
-    render; neither should take down a sweep reading a whole issue's history.
-    """
-    m = _BLOCK_RE.search(body or "")
-    if not m:
-        return None
-    try:
-        block = json.loads(m.group(1))
-    except ValueError:
-        return None
-    if not isinstance(block, dict) or block.get("v") != BLOCK_VERSION:
-        return None
-    return block
-
-
-# --------------------------------------------------------------- the triage run
 
 def _issue_prompt(issue: dict) -> str:
     labels = ", ".join(issue.get("labels") or []) or "none"
@@ -571,20 +407,23 @@ def _analyse(issue: dict, client=None) -> tuple:
     """
     client = client or toolloop.new_client()
     messages = [{"role": "user", "content": _issue_prompt(issue)}]
-    spend = _spend(None)
+    spend = verdict.normalised_cost(None)
 
     for event, payload in toolloop.run(
             client, messages,
             schemas=tools.schemas(include_writes=False),
-            system=toolloop.system_blocks(TRIAGE_PROMPT),
-            final_schema=VERDICT_SCHEMA,
-            max_iterations=TRIAGE_ITERATIONS):
+            system=toolloop.system_blocks(verdict.TRIAGE_PROMPT),
+            final_schema=verdict.VERDICT_SCHEMA,
+            max_iterations=TRIAGE_ITERATIONS, max_seconds=TRIAGE_SECONDS):
         if event not in ("finished", "suspended"):
             continue
         usage = payload.get("usage")
-        spend = _spend({
+        spend = verdict.normalised_cost({
             "input": toolloop.prompt_tokens(usage) if usage else 0,
-            "output": (getattr(usage, "output_tokens", 0) or 0) if usage else 0,
+            # Summed across the run, like "input" and "usd". usage_last holds
+            # only the final reply, so reading it here under-reported every
+            # multi-turn run and would not reconcile against usd.
+            "output": int(payload.get("output_tokens") or 0),
             "usd": payload.get("cost") or 0.0,
         })
         if payload.get("error"):
@@ -679,13 +518,13 @@ def triage(number, *, issue=None, analyse=None, comment=None, label=None,
     except TriageFailed as e:
         result, spend, error = None, e.spend, str(e)
     except Exception as e:  # noqa: BLE001 — any failure still has to mark the issue
-        result, spend, error = None, _spend(None), f"{type(e).__name__}: {e}"
+        result, spend, error = None, verdict.normalised_cost(None), f"{type(e).__name__}: {e}"
 
-    block = machine_block(result, cost=spend, error=error)
+    block = verdict.machine_block(result, cost=spend, error=error)
     prose = (_failure_prose(number, error) if error
              else (str((result or {}).get("summary") or "").strip()
                    or "(the run returned no summary)"))
-    body = comment_body(block, prose)
+    body = verdict.comment_body(block, prose)
 
     posted, unposted = None, None
     try:
@@ -699,7 +538,19 @@ def triage(number, *, issue=None, analyse=None, comment=None, label=None,
     # even when the comment did not post: an issue left unmarked is re-triaged,
     # and paid for, on every sweep from then on — the retry storm recorded on the
     # weekly report's last-run timestamp, which is written only on success.
-    label(number, [TRIAGED_LABEL])
+    labelled, unlabelled = True, None
+    try:
+        label(number, [TRIAGED_LABEL])
+    except Exception as e:  # noqa: BLE001
+        # The one call that must not fail silently. Unmarked means #36 re-triages
+        # this issue, and pays for it, on every sweep from now on. Nothing here
+        # can force the label on, so make it loud rather than raising: the run
+        # did happen and the verdict is already posted.
+        labelled = False
+        unlabelled = f"{type(e).__name__}: {e}"
+        oplog.add("error", "labissues",
+                  f"triage #{number}: NOT marked {TRIAGED_LABEL} — it will be "
+                  f"re-triaged until this is fixed: {unlabelled}")
 
     oplog.add("warn" if error else "action", "labissues",
               f"triage #{number}: {block['verdict']} "
@@ -707,7 +558,7 @@ def triage(number, *, issue=None, analyse=None, comment=None, label=None,
               f"${block['cost']['usd']:.4f}" + (f" — {error}" if error else ""))
     return {"number": number, "title": issue.get("title"), "ok": error is None,
             "verdict": block, "error": error, "unposted": unposted,
-            "labelled": True, "label": TRIAGED_LABEL,
+            "labelled": labelled, "unlabelled": unlabelled, "label": TRIAGED_LABEL,
             "comment_url": posted.get("html_url") if isinstance(posted, dict) else None}
 
 

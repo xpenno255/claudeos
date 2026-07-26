@@ -10,7 +10,6 @@ import { api } from "../api.js";
 import { el, timeAgo, clockTime } from "../util.js";
 
 const REFRESH_MS = 30000;          // the server sweeps every 60 s
-const TRIAGED_LABEL = "claudeos:triaged";
 
 export async function renderLabIssues(root) {
   async function draw() {
@@ -78,7 +77,7 @@ function lastKnown(snap, issues) {
       snap.changed
         ? `as read at ${clockTime(snap.changed)} (${timeAgo(snap.changed)}) — issues raised or closed since then are not here`
         : "may be out of date"),
-    table(issues));
+    table(issues, snap.triage_label));
 }
 
 // Reassuring: the queue really is clear.
@@ -104,7 +103,10 @@ function pendingPanel() {
 }
 
 function queue(snap, issues) {
-  const untriaged = issues.filter(i => !isTriaged(i)).length;
+  // The label name is the server's to own; the view is handed it, never
+  // hard-codes it, so there is one source for the string and not two.
+  const label = snap.triage_label;
+  const untriaged = issues.filter(i => !isTriaged(i, label)).length;
   return el("div", {},
     el("div", { class: "ops-toolbar" },
       el("span", { class: "pill neutral" }, `${issues.length} OPEN`),
@@ -114,15 +116,15 @@ function queue(snap, issues) {
       el("span", { class: "mono-dim" }, sweepLine(snap))),
     el("div", { class: "panel" },
       el("div", { class: "panel-title" }, `LAB ISSUE QUEUE — ${issues.length} OPEN`),
-      table(issues)));
+      table(issues, label)));
 }
 
 // ---------------------------------------------------------------- table
 
-function table(issues) {
+function table(issues, label) {
   const rows = [...issues]
     .sort((a, b) => stamp(b.created_at) - stamp(a.created_at))
-    .map(issueRow);
+    .map(i => issueRow(i, label));
   return el("div", { class: "table-wrap" },
     el("table", {},
       el("thead", {}, el("tr", {},
@@ -135,14 +137,14 @@ function table(issues) {
       el("tbody", {}, ...rows)));
 }
 
-function issueRow(i) {
+function issueRow(i, label) {
   const open = i.state !== "closed";
   const opened = stamp(i.created_at);
   return el("tr", {},
     el("td", {}, el("span", { class: `led ${open ? "ok" : "off"}`, title: open ? "open" : "closed" })),
     el("td", { class: "num mono-dim" }, `#${i.number ?? "?"}`),
     el("td", { class: "strong", title: preview(i.body) }, i.title || "(untitled)"),
-    el("td", {}, triagePill(i)),
+    el("td", {}, triagePill(i, label)),
     el("td", { class: "num" }, opened ? timeAgo(opened) : "—"),
     el("td", {}, el("div", { class: "actions" },
       i.html_url
@@ -151,15 +153,15 @@ function issueRow(i) {
         : null)));
 }
 
-function isTriaged(issue) {
-  return (issue.labels || []).includes(TRIAGED_LABEL);
+function isTriaged(issue, label) {
+  return Boolean(label) && (issue.labels || []).includes(label);
 }
 
-// `claudeos:triaged` is the marker the triage run writes, and nothing wears it
-// yet, so every row reads UNTRIAGED. Verdict, confidence and severity are not
-// in this snapshot and are not guessed at here.
-function triagePill(issue) {
-  return isTriaged(issue)
+// `claudeos:triaged` is the marker the triage run writes, so a row reads
+// TRIAGED once one has completed against it. Verdict, confidence and severity
+// are not in this snapshot and are not guessed at here — rendering them is #35.
+function triagePill(issue, label) {
+  return isTriaged(issue, label)
     ? el("span", { class: "pill ok" }, "✓ TRIAGED")
     : el("span", { class: "pill neutral" }, "○ UNTRIAGED");
 }

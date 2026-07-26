@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import labissues as _labissues  # noqa: E402
 from app import oplog as _oplog  # noqa: E402
 from app import store as _store  # noqa: E402
+from app import verdict as _verdict  # noqa: E402
 from app import tools as _tools  # noqa: E402
 from app.httpclient import HttpError  # noqa: E402
 
@@ -238,9 +239,10 @@ SPEND = {"input": 41_200, "output": 900, "usd": 0.09123}
 class Tracker:
     """A stand-in for the issue tracker: records the writes triage would make."""
 
-    def __init__(self, comment_raises=None):
+    def __init__(self, comment_raises=None, label_raises=None):
         self.comments, self.labels = [], []
         self._comment_raises = comment_raises
+        self._label_raises = label_raises
 
     def comment(self, number, body):
         self.comments.append((number, body))
@@ -249,6 +251,8 @@ class Tracker:
         return {"html_url": f"https://github.com/x/y/issues/{number}#issuecomment-9"}
 
     def label(self, number, names):
+        if self._label_raises is not None:
+            raise self._label_raises
         self.labels.append((number, list(names)))
 
     @property
@@ -301,7 +305,7 @@ class TriageTest(unittest.TestCase):
         a dropped field, a coerced enum — is a verdict the UI will misreport."""
         result = self.run_triage()
 
-        parsed = self.labissues.parse_verdict(self.tracker.body)
+        parsed = _verdict.parse_verdict(self.tracker.body)
         self.assertEqual(parsed, result["verdict"], "block did not survive the trip")
         self.assertEqual(parsed["verdict"], "refuted")
         self.assertEqual(parsed["confidence"], "medium")
@@ -321,7 +325,7 @@ class TriageTest(unittest.TestCase):
             tracker = Tracker()
             self.run_triage(analyse=analysis({**VERDICT, "verdict": value}),
                             comment=tracker.comment, label=tracker.label)
-            seen.append(self.labissues.parse_verdict(tracker.body)["verdict"])
+            seen.append(_verdict.parse_verdict(tracker.body)["verdict"])
 
         self.assertEqual(seen, ["diagnosed", "refuted", "inconclusive", "no_fault_found"])
 
@@ -337,10 +341,36 @@ class TriageTest(unittest.TestCase):
 
         self.assertNotIn("-->", self.tracker.body.split("<!--")[1].rsplit("-->", 1)[0],
                          "an unescaped --> would close the block early")
-        parsed = self.labissues.parse_verdict(self.tracker.body)
+        parsed = _verdict.parse_verdict(self.tracker.body)
         self.assertEqual(parsed["evidence"][0]["note"], note)
 
     # --------------------------------------------------------- the failure path
+
+    def test_a_label_write_that_fails_is_reported_not_raised(self):
+        """The marker is the one write that must not fail silently: unmarked
+        means #36 re-triages this issue, and pays for it, on every sweep. It
+        cannot be forced, so it must be loud — and it must not raise, because
+        the run happened and the verdict is already posted."""
+        t = Tracker(label_raises=ConnectionError("GitHub refused the label (403)"))
+
+        out = self.labissues.triage(1, issue=dict(ISSUE), analyse=analysis(),
+                                    comment=t.comment, label=t.label)
+
+        self.assertEqual(len(t.comments), 1, "the verdict should still be posted")
+        self.assertFalse(out["labelled"], "an unwritten marker was reported as written")
+        self.assertIn("403", out["unlabelled"])
+
+    def test_cost_output_is_summed_across_the_whole_run(self):
+        """input and usd accumulate over the run; output must too, or the
+        recorded figures cannot be reconciled against each other."""
+        t = Tracker()
+        spend = {"input": 40_000, "output": 1_500, "usd": 0.21}
+
+        out = self.labissues.triage(1, issue=dict(ISSUE),
+                                    analyse=analysis(spend=spend),
+                                    comment=t.comment, label=t.label)
+
+        self.assertEqual(out["verdict"]["cost"]["output"], 1_500)
 
     def test_a_run_that_dies_mid_way_still_marks_the_issue(self):
         """The retry storm this feature must not reproduce: an unmarked failure
@@ -374,7 +404,7 @@ class TriageTest(unittest.TestCase):
 
         self.run_triage(analyse=analysis(raises=died))
 
-        cost = self.labissues.parse_verdict(self.tracker.body)["cost"]
+        cost = _verdict.parse_verdict(self.tracker.body)["cost"]
         self.assertEqual(cost["usd"], 0.21)
         self.assertEqual(cost["input"], 96_000)
 
@@ -386,7 +416,7 @@ class TriageTest(unittest.TestCase):
 
         self.run_triage(analyse=analysis(raises=died))
 
-        parsed = self.labissues.parse_verdict(self.tracker.body)
+        parsed = _verdict.parse_verdict(self.tracker.body)
         self.assertEqual(parsed["verdict"], "inconclusive")
         self.assertEqual(parsed["confidence"], "low")
         self.assertIn("declined", parsed["error"])
@@ -413,7 +443,7 @@ class TriageTest(unittest.TestCase):
                      "<!-- claudeos-triage [1, 2, 3] -->",
                      "<!-- claudeos-triage {\"v\": 99, \"verdict\": \"diagnosed\"} -->"):
             with self.subTest(body=body):
-                self.assertIsNone(self.labissues.parse_verdict(body))
+                self.assertIsNone(_verdict.parse_verdict(body))
 
     def test_a_verdict_the_model_invented_lands_on_the_cautious_answer(self):
         """The vocabularies are closed and the source is a language model. An
@@ -425,7 +455,7 @@ class TriageTest(unittest.TestCase):
             "evidence": [{"tool": "get_ops_log", "status": "made_up", "note": "x"}],
             "remediation": {"kind": "reboot_everything", "text": "turn it off"}}))
 
-        parsed = self.labissues.parse_verdict(self.tracker.body)
+        parsed = _verdict.parse_verdict(self.tracker.body)
         self.assertEqual(parsed["verdict"], "inconclusive")
         self.assertEqual(parsed["confidence"], "low")
         self.assertEqual(parsed["severity"], "info")
@@ -440,7 +470,7 @@ class TriageTest(unittest.TestCase):
             **VERDICT, "remediation": {"kind": "fix", "text": "restart the coordinator",
                                        "executable": True}}))
 
-        parsed = self.labissues.parse_verdict(self.tracker.body)
+        parsed = _verdict.parse_verdict(self.tracker.body)
         self.assertEqual(parsed["remediation"]["kind"], "fix")
         self.assertIs(parsed["remediation"]["executable"], False)
 
@@ -458,7 +488,7 @@ class TriageTest(unittest.TestCase):
         self.run_triage(analyse=analysis({**VERDICT, "summary": "   "}))
 
         self.assertTrue(self.tracker.body.strip())
-        self.assertIsNotNone(self.labissues.parse_verdict(self.tracker.body))
+        self.assertIsNotNone(_verdict.parse_verdict(self.tracker.body))
 
     # ---------------------------------------------------------- preconditions
 
@@ -579,13 +609,13 @@ class TriageRunTest(unittest.TestCase):
         final = client.calls[-1]
         self.assertNotIn("tools", final, "the final call could still request a tool")
         self.assertEqual(final["output_config"]["format"]["schema"],
-                         self.labissues.VERDICT_SCHEMA)
+                         _verdict.VERDICT_SCHEMA)
         for call in client.calls[:-1]:
             self.assertNotIn("format", call["output_config"],
                              "a mid-run call asked for the verdict schema")
 
         self.assertTrue(result["ok"], result["error"])
-        self.assertEqual(self.labissues.parse_verdict(self.tracker.body)["verdict"],
+        self.assertEqual(_verdict.parse_verdict(self.tracker.body)["verdict"],
                          "refuted")
         self.assertEqual(self.tracker.labelled, [1])
 
@@ -607,7 +637,7 @@ class TriageRunTest(unittest.TestCase):
         self.assertIn("the API is down", result["error"])
         self.assertEqual(self.tracker.labelled, [1], "a dead API left the issue unmarked")
         self.assertEqual(
-            self.labissues.parse_verdict(self.tracker.body)["verdict"], "inconclusive")
+            _verdict.parse_verdict(self.tracker.body)["verdict"], "inconclusive")
 
 
 if __name__ == "__main__":
