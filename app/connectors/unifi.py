@@ -102,6 +102,17 @@ def summary(settings: dict) -> dict:
     }
 
 
+def metrics(summary: dict) -> dict:
+    """Sparkline series. `tx_bytes-r`/`rx_bytes-r` are UniFi's instantaneous WAN
+    rates, so they are recorded as-is rather than differenced."""
+    return {
+        "clients": summary.get("clients"),
+        "latency_ms": summary.get("isp_latency_ms"),
+        "wan_rx_bps": summary.get("rx_bytes_r"),
+        "wan_tx_bps": summary.get("tx_bytes_r"),
+    }
+
+
 def devices(settings: dict) -> list:
     data = _call(settings, "GET", "/proxy/network/api/s/default/stat/device").get("data", [])
     out = []

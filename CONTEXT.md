@@ -19,6 +19,11 @@ it stops answering, something is wrong with the lab. `poller.poll_once()` sweeps
 connector on a 30s interval, records ok/error plus sparkline metrics, and alerts on a
 `True→False` transition.
 
+**The interface is written down**, in the `app/connectors/__init__.py` docstring:
+`test`, `summary` and `metrics`, the settings shape, and the exception taxonomy the
+server maps to HTTP status. It is the contract a new connector satisfies and the only
+thing the poller and the server know about any of them.
+
 **Not every external system ClaudeOS talks to is a connector.** `ai`, `registries`, the
 five notification channels, and `labissues` are all configured on Setup and hold
 encrypted credentials, but none is polled and none has up/down semantics. Encrypted

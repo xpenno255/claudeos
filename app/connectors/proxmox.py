@@ -136,6 +136,21 @@ def summary(settings: dict) -> dict:
     }
 
 
+def metrics(summary: dict) -> dict:
+    """Sparkline series. `cpu_avg` is a 0–1 fraction across nodes and memory is
+    raw bytes, so both become percentages here — the chart axis is the reason
+    the conversion exists, so it belongs on this side of the seam."""
+    mem_pct = None
+    if summary.get("mem_total"):
+        mem_pct = 100.0 * summary["mem_used"] / summary["mem_total"]
+    cpu = summary.get("cpu_avg")
+    return {
+        "cpu_pct": round(cpu * 100, 1) if cpu is not None else None,
+        "mem_pct": round(mem_pct, 1) if mem_pct is not None else None,
+        "guests_running": summary.get("guests_running"),
+    }
+
+
 def storage(settings: dict) -> list:
     data = _call(settings, "GET", "/cluster/resources?type=storage").get("data", [])
     out = []

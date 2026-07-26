@@ -182,6 +182,17 @@ def summary(settings: dict) -> dict:
     return out
 
 
+def metrics(summary: dict) -> dict:
+    """Sparkline series. `vol_pct` is `None` when Storage Manager refused the
+    call for want of privileges, which is a hint on the tile and a gap in the
+    chart rather than a failed poll."""
+    return {
+        "cpu_pct": summary.get("cpu_pct"),
+        "mem_pct": summary.get("mem_pct"),
+        "vol_pct": summary.get("vol_pct"),
+    }
+
+
 def storage(settings: dict) -> dict:
     """Volumes + physical disks from Storage Manager (load_info)."""
     data = _call(settings, "SYNO.Storage.CGI.Storage", "load_info")
