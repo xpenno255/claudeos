@@ -42,6 +42,54 @@ a ClaudeOS issue is about this codebase.
 
 ClaudeOS never opens a lab issue; it reads, triages, and comments.
 
+### Triage run
+
+**One agentic, read-only investigation of a single lab issue.** It drives the
+shared tool loop with `tools.schemas(include_writes=False)` and no approval
+channel, gathers evidence across connectors, and ends in a **verdict**.
+
+A triage run never changes the lab. Its output is text, including any
+remediation it proposes — a human decides whether to act, and Ops Chat is where
+they would execute it, because that is the caller with confirm-gated write
+tools. Runs are unattended: nobody is watching while one happens.
+
+### Verdict
+
+**What a triage run concluded**, in a closed vocabulary owned by `app/verdict.py`:
+
+| `verdict` | Means |
+| --- | --- |
+| `diagnosed` | Cause identified |
+| `refuted` | Leading hypothesis ruled out, cause still open |
+| `inconclusive` | Could not tell |
+| `no_fault_found` | Looked, found nothing wrong |
+
+`refuted` is a **useful result, not a failure** — eliminating a hypothesis saves
+the owner from checking it. `no_fault_found` and `inconclusive` are distinct, and
+both are distinct from *untriaged*: the UI must never conflate "nobody has looked"
+with "looked, nothing wrong".
+
+Evidence carries a status **per finding**, not per verdict — `success`,
+`no_data`, `truncated`, `excluded`. `no_data` is not health (see **read-only**'s
+neighbour rule in the tool-result semantics); `excluded` names evidence
+deliberately not used, with the reason, so a human reading the same source does
+not draw the conclusion the run rejected.
+
+Remediation carries a `kind`: `fix`, `diagnostic`, or `none`. A schema that
+assumes a fix will manufacture one.
+
+### Machine block
+
+**The machine-readable half of a triage comment** — a JSON payload inside an HTML
+comment, which GitHub renders invisibly. One comment therefore serves two readers:
+a human sees prose, the app parses fields.
+
+Its presence is also how ClaudeOS could recognise its own comments, which matters
+because a fine-grained token posts **as its human owner** — author identity cannot
+distinguish them. `BLOCK_VERSION` is its compatibility clock.
+
+_Avoid_: "the JSON", "the payload". The block is a named thing with a version.
+
 ### Read-only
 
 In the context of triage, **read-only always means against the lab** —

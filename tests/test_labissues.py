@@ -174,22 +174,35 @@ class SweepTest(unittest.TestCase):
             self.assertNotIn(noise, kept)
 
 
-class UnusableConfigTest(unittest.TestCase):
-    """The default path, where sweep resolves its own config. A sweep that
-    cannot even build a request must fail *quietly and visibly*: quietly
-    because the sweeper would otherwise log the same line every 60s forever,
-    visibly because the UI has to say why nothing is being fetched."""
+class IsolatedDataDirTest(unittest.TestCase):
+    """Base for tests that exercise the default path, where the module resolves
+    its own config and writes its own ops-log lines.
+
+    Both resolve their paths at import, so a temp CLAUDEOS_DATA only takes
+    effect after a reload — which also gives each test a clean module-level
+    cache without reaching into private state.
+    """
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         os.environ["CLAUDEOS_DATA"] = self.tmp
         self.store = importlib.reload(_store)
+        importlib.reload(_oplog)
         self.labissues = importlib.reload(_labissues)
+        self.tracker = Tracker()
 
     def tearDown(self):
         os.environ.pop("CLAUDEOS_DATA", None)
         shutil.rmtree(self.tmp, ignore_errors=True)
         importlib.reload(_store)
+        importlib.reload(_oplog)
+
+
+class UnusableConfigTest(IsolatedDataDirTest):
+    """The default path, where sweep resolves its own config. A sweep that
+    cannot even build a request must fail *quietly and visibly*: quietly
+    because the sweeper would otherwise log the same line every 60s forever,
+    visibly because the UI has to say why nothing is being fetched."""
 
     def test_an_unconfigured_install_does_not_raise(self):
         self.labissues.sweep()
@@ -273,22 +286,7 @@ def analysis(verdict=None, spend=None, raises=None):
     return _run
 
 
-class TriageTest(unittest.TestCase):
-    def setUp(self):
-        # A temp data dir so the ops-log lines triage writes never land in the
-        # real one. oplog resolves its path at import, so it reloads too.
-        self.tmp = tempfile.mkdtemp()
-        os.environ["CLAUDEOS_DATA"] = self.tmp
-        importlib.reload(_store)
-        importlib.reload(_oplog)
-        self.labissues = importlib.reload(_labissues)
-        self.tracker = Tracker()
-
-    def tearDown(self):
-        os.environ.pop("CLAUDEOS_DATA", None)
-        shutil.rmtree(self.tmp, ignore_errors=True)
-        importlib.reload(_store)
-        importlib.reload(_oplog)
+class TriageTest(IsolatedDataDirTest):
 
     def run_triage(self, **kw):
         kw.setdefault("issue", ISSUE)
@@ -565,24 +563,10 @@ class FakeClient:
         self.messages = FakeMessages(replies, self.calls)
 
 
-class TriageRunTest(unittest.TestCase):
+class TriageRunTest(IsolatedDataDirTest):
     """The default run, driven through triage with a fake client in place of the
     API. Covers the two properties that are safety claims rather than
     conveniences: no write tool is ever offered, and the run ends in data."""
-
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp()
-        os.environ["CLAUDEOS_DATA"] = self.tmp
-        importlib.reload(_store)
-        importlib.reload(_oplog)
-        self.labissues = importlib.reload(_labissues)
-        self.tracker = Tracker()
-
-    def tearDown(self):
-        os.environ.pop("CLAUDEOS_DATA", None)
-        shutil.rmtree(self.tmp, ignore_errors=True)
-        importlib.reload(_store)
-        importlib.reload(_oplog)
 
     def test_the_run_offers_no_write_tool_and_ends_in_a_parsed_verdict(self):
         # A tool call, then prose (the ordinary ending — the model has stopped
