@@ -233,22 +233,36 @@ function budgetPill(b) {
 
 // A queue stalled on budget and an idle one look identical from the rows alone
 // — both just sit there. Only this says which.
+//
+// One branch per band, because the three are different facts: past soft is a
+// pause, past hard is a pause somebody has been told about, past twice hard is
+// off for the day. Collapsing them means naming the wrong limit on screen.
+const BANDS = {
+  soft:    { led: "warn", edge: "warning",  head: "AUTOMATIC TRIAGE PAUSED — DAILY BUDGET",
+             limit: (b) => `${MONEY(b.soft)} soft limit`, said: "" },
+  hard:    { led: "err",  edge: "critical", head: "AUTOMATIC TRIAGE PAUSED — PAST THE HARD LIMIT",
+             limit: (b) => `${MONEY(b.hard)} hard limit`,
+             said: " A notification has gone out." },
+  stopped: { led: "err",  edge: "critical", head: "AUTOMATIC TRIAGE STOPPED — DAILY BUDGET",
+             limit: (b) => `${MONEY(b.stop)} stop limit`,
+             said: " That is past the hard limit as well, so a notification has gone out." },
+};
+
 function budgetNotice(b, waiting) {
-  if (!b || b.state === "ok") return null;
-  const stopped = b.state === "stopped";
-  return el("div", { class: "panel", style: `border-left:3px solid var(--${stopped ? "critical" : "warning"})` },
-    el("div", { class: "panel-title" },
-      el("span", { class: `led ${stopped ? "err" : "warn"}` }),
-      stopped ? "AUTOMATIC TRIAGE STOPPED — DAILY BUDGET" : "AUTOMATIC TRIAGE PAUSED — DAILY BUDGET"),
+  const band = b && BANDS[b.state];
+  if (!band) return null;
+  return el("div", { class: "panel", style: `border-left:3px solid var(--${band.edge})` },
+    el("div", { class: "panel-title" }, el("span", { class: `led ${band.led}` }), band.head),
     el("div", { class: "mono-dim" },
       `${MONEY(b.usd)} spent today across ${b.runs} run${b.runs === 1 ? "" : "s"}, past the `,
-      el("b", {}, stopped ? `${MONEY(b.stop)} stop limit` : `${MONEY(b.soft)} soft limit`),
+      el("b", {}, band.limit(b)),
       `. No issue will be triaged automatically until the day resets at midnight`,
       waiting ? `, and ${waiting} ${waiting === 1 ? "is" : "are"} waiting.` : ".",
-      stopped ? " This is past the hard limit as well, so a notification has gone out." : ""),
+      band.said),
     el("div", { class: "mono-dim", style: "margin-top:8px" },
-      "The queue below is current — this is a spending pause, not a fault. Triggering a "
-      + "run by hand still works: the budget bounds what happens unattended."));
+      "The queue below is current — this is a spending pause, not a fault. Every run counts "
+      + "towards it, including ones you start yourself, but triggering one by hand is never "
+      + "blocked: the budget exists because nobody is watching the automatic ones."));
 }
 
 // Triage needs the Anthropic SDK, exactly as chat does. Stated up front, next
@@ -387,6 +401,12 @@ function verdictClass(verdict, severity) {
   return severity === "critical" ? "err" : "warn";
 }
 
+// A severity on its own — not a verdict — where grey is fine because the word
+// beside it says what it is. This is the AI findings list's mapping.
+function severityClass(sev) {
+  return sev === "critical" ? "err" : sev === "info" ? "neutral" : "warn";
+}
+
 function triageCell(st) {
   if (st.kind === "running") {
     return el("div", { class: "ai-running", style: "padding:0" },
@@ -471,10 +491,13 @@ async function renderVerdict(root, arg) {
   return () => {};
 }
 
+function backButton() {
+  return el("a", { href: "#/labissues" },
+    el("button", { class: "btn btn-mini btn-ghost" }, "◂ BACK TO THE QUEUE"));
+}
+
 function backLink() {
-  return el("div", { class: "ops-toolbar" },
-    el("a", { href: "#/labissues" },
-      el("button", { class: "btn btn-mini btn-ghost" }, "◂ BACK TO THE QUEUE")));
+  return el("div", { class: "ops-toolbar" }, backButton());
 }
 
 function verdictPanels(number, got) {
@@ -488,8 +511,7 @@ function verdictPanels(number, got) {
       el("p", {}, `Lab issue #${number} carries no triage verdict — not here, and not in its `,
         "comments on GitHub. It may have been marked by hand, or triaged by a version of ",
         "ClaudeOS older than the current machine-block format."),
-      el("a", { href: "#/labissues" },
-        el("button", { class: "btn btn-mini btn-ghost" }, "◂ BACK TO THE QUEUE")))];
+      backButton())];
   }
 
   const failed = Boolean(v.error);
@@ -505,8 +527,7 @@ function verdictPanels(number, got) {
       // Not on the failure path. A run that died never assessed severity or
       // confidence — the block carries the cautious defaults, and rendering
       // them as pills claims a judgement nothing made.
-      failed ? null : el("span", { class: `pill ${sev === "critical" ? "err" : sev === "info" ? "neutral" : "warn"}` },
-        sev.toUpperCase()),
+      failed ? null : el("span", { class: `pill ${severityClass(sev)}` }, sev.toUpperCase()),
       failed ? null : el("span", { class: "pill neutral" },
         `${v.confidence || "?"} confidence`.toUpperCase()),
       el("span", { class: "finding-title" }, got.title || `LAB ISSUE #${number}`)),
@@ -534,8 +555,7 @@ function verdictPanels(number, got) {
         ? el("a", { href: got.comment_url, target: "_blank", rel: "noopener" },
             el("button", { class: "btn btn-mini btn-ghost" }, "THE TRIAGE COMMENT ↗"))
         : null,
-      el("a", { href: "#/labissues" },
-        el("button", { class: "btn btn-mini btn-ghost" }, "◂ BACK TO THE QUEUE"))))];
+      backButton()))];
 }
 
 const SEVERITIES = new Set(["critical", "serious", "warning", "info"]);

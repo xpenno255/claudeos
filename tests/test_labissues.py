@@ -926,7 +926,7 @@ class AutoTriageTest(IsolatedDataDirTest):
         sent = []
         self.triagelog.spend(self.triagelog.HARD_USD)
 
-        self.sweep_once((1, [], None), notify=lambda **kw: sent.append(kw))
+        self.sweep_once((1, [], None), notifier=lambda **kw: sent.append(kw))
 
         self.assertEqual(len(sent), 1)
         self.assertEqual(sent[0]["priority"], "high")
@@ -937,7 +937,7 @@ class AutoTriageTest(IsolatedDataDirTest):
         self.triagelog.spend(self.triagelog.HARD_USD)
 
         for _ in range(3):
-            self.sweep_once((1, [], None), notify=lambda **kw: sent.append(kw))
+            self.sweep_once((1, [], None), notifier=lambda **kw: sent.append(kw))
 
         self.assertEqual(len(sent), 1)
 
@@ -975,6 +975,48 @@ class AutoTriageTest(IsolatedDataDirTest):
         self.sweep_once((1, [self.labissues.TRIAGED_LABEL], None))
 
         self.assertEqual(self.ran, [1], "a failed run was retried")
+
+    # -------------------------------------------- the gate reads a cached copy
+
+    def test_a_run_whose_label_write_failed_is_not_run_again(self):
+        """The retry storm this feature exists not to reproduce, in its subtlest
+        form. When the label write fails the issue stays label-free forever, so
+        a label-only gate re-runs and re-pays for it every single pass. The
+        record says we already looked; that has to count."""
+        def unmarkable(number, **kw):
+            self.ran.append(number)
+            self.triagelog.record(number, {
+                "number": number, "ok": True, "labelled": False,
+                "verdict": _verdict.machine_block(dict(VERDICT), cost=dict(SPEND))})
+            return {}
+
+        self.sweep_once((1, [], None), run=unmarkable)
+        # The label never landed, so the issue still looks untriaged on GitHub.
+        self.sweep_once((1, [], None))
+        self.sweep_once((1, [], None))
+
+        self.assertEqual(self.ran, [1], "an unmarked run was retried and paid for again")
+
+    def test_an_issue_triaged_since_the_cache_was_read_is_not_run_twice(self):
+        """The sweep and this pass are separate threads on the same interval, so
+        a run finishing at T can be followed by a pass reading a cache filled
+        before T: the label is on the issue and absent from our copy. Believing
+        that copy buys a second run of the same investigation."""
+        self.sweep_once((1, [], None), seen_at=time.time() - 600)
+
+        # Same stale copy — the sweep has not refreshed since the run.
+        self.sweep_once((1, [], None), seen_at=time.time() - 600)
+
+        self.assertEqual(self.ran, [1], "a stale cache caused a second paid run")
+
+    def test_a_label_removed_after_a_fresh_read_makes_it_eligible_again(self):
+        """The other side of that rule: once the cache has actually been read
+        again and the label is gone, a human has removed it and means it."""
+        self.sweep_once((1, [], None), seen_at=time.time() - 600)
+
+        self.sweep_once((1, [], None), seen_at=time.time() + 1)
+
+        self.assertEqual(self.ran, [1, 1])
 
     def test_a_pass_with_nothing_to_do_is_not_a_budget_skip(self):
         """A stalled queue and an idle one must not look the same to the UI."""

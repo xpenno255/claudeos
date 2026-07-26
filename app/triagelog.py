@@ -59,12 +59,14 @@ STOP_USD = HARD_USD * 2  # disabled until the day resets
 
 _lock = threading.Lock()
 
-_EMPTY = {"runs": {}, "daily": {}}
+
+def _blank() -> dict:
+    return {"runs": {}, "daily": {}}
 
 
 def _load() -> dict:
     if not os.path.exists(PATH):
-        return json.loads(json.dumps(_EMPTY))
+        return _blank()
     try:
         with open(PATH, "r", encoding="utf-8") as f:
             d = json.load(f)
@@ -72,9 +74,9 @@ def _load() -> dict:
         # A truncated or hand-edited file must not take down the queue view.
         # Losing these records costs a re-read of GitHub, nothing more.
         oplog.add("warn", "labissues", f"triage records unreadable, starting fresh: {e}")
-        return json.loads(json.dumps(_EMPTY))
+        return _blank()
     if not isinstance(d, dict):
-        return json.loads(json.dumps(_EMPTY))
+        return _blank()
     if not isinstance(d.get("runs"), dict):
         d["runs"] = {}
     if not isinstance(d.get("daily"), dict):
@@ -190,9 +192,9 @@ def _view(daily: dict) -> dict:
             "state": _state(usd), "soft": SOFT_USD, "hard": HARD_USD, "stop": STOP_USD}
 
 
-def ledger(*, ts=None) -> dict:
+def ledger() -> dict:
     """What triage has spent today, and which band that puts it in."""
-    day = _day(ts)
+    day = _day()
     with _lock:
         return _view(_fresh(_load()["daily"], day))
 
@@ -215,7 +217,7 @@ def spend(usd, *, ts=None) -> dict:
         return _view(daily)
 
 
-def mark(flag: str, *, ts=None) -> bool:
+def mark(flag: str) -> bool:
     """Claim a once-a-day event. True the first time today, False after.
 
     The sweep runs every minute, so "log when the budget stops us" without this
@@ -223,7 +225,7 @@ def mark(flag: str, *, ts=None) -> bool:
     read. Claiming and writing happen under the same lock, so two threads cannot
     both win.
     """
-    day = _day(ts)
+    day = _day()
     with _lock:
         d = _load()
         daily = _fresh(d["daily"], day)

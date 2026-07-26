@@ -108,26 +108,36 @@ its own key in the same file.
 
 ### Daily budget
 
-**What unattended triage may spend in one local calendar day**, in three bands
-owned by `app/triagelog.py`: **soft** ($2), **hard** ($4), **stop** ($8).
+**What triage has spent in one local calendar day**, against three thresholds
+owned by `app/triagelog.py`: `SOFT_USD` ($2), `HARD_USD` ($4), `STOP_USD` ($8).
+The band is reported as a state — `ok`, `soft`, `hard`, `stopped`.
 
 | Band | What happens |
 | --- | --- |
-| soft | No new automatic run starts. Logged once, not once a minute. |
-| hard | Notifies at `high` — a single run overshot badly enough to need a human. |
-| stop | Automatic triage is off until the day resets. |
+| `soft` | No new automatic run starts. Logged once a day, not once a pass. |
+| `hard` | Also notifies at `high`: the sweep is blocked and issues are waiting. |
+| `stopped` | Same, past twice the hard limit — the "disabled until reset" band. |
 
-Soft is the only band a healthy install meets, because no run starts above it;
-the two above exist for **overshoot**, since one run started just under soft can
-cost $3–5 by itself. Reset is by comparing the stored date to today's, so
-"until the day resets" needs nothing running at midnight to come true.
+Soft is the only band a healthy install meets, because no automatic run starts
+above it; the two above exist for **overshoot**, since one run started just under
+soft can cost $3–5 by itself. Reset is by comparing the stored date to today's,
+so "until the day resets" needs nothing running at midnight to come true.
 
-**It bounds the unattended sweep, not the person.** A hand-triggered run from
-the queue is a human deciding to spend and is never blocked — the budget exists
-because nobody is watching the automatic ones.
+**Every run is charged; only the unattended sweep is gated.** A hand-triggered
+run counts towards the day — the money is the money — but is never blocked,
+because a person clicking the button is deciding to spend. The bands exist for
+the runs nobody is watching. This is why the `hard` notification says only that
+the sweep is blocked, and never that a run overshot: the spend may have been
+somebody's deliberate afternoon.
 
 Failed runs count. The tokens were billed; a ledger that counted only successes
 would under-report exactly the runs most likely to be repeated.
+
+The gate itself is the `claudeos:triaged` label — but read from the sweep's
+*cached* copy, so two things guard it (`labissues.eligible`): a run that could
+not be marked (`labelled: false`) is never retried automatically, and a label
+absent from a copy older than the run that would have applied it is not
+believed. Both failures cost a second paid investigation of the same issue.
 
 ### Read-only
 

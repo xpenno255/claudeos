@@ -641,13 +641,23 @@ def run_triage(number, **kwargs) -> dict:
             _run.update(number=None, since=None)
         _slot.release()
 
+    # Charged first, and in its own try. The record is a convenience GitHub can
+    # replace; the charge is money that has already left, and putting the two in
+    # one block let a failed record write swallow it.
+    #
+    # In `run_triage` rather than `triage()` for the same reason as the record:
+    # `triage()` reports what one run did, and what a day of runs has cost is
+    # the caller's ledger. Charged whether the run finished or died — the tokens
+    # were billed either way.
+    try:
+        triagelog.spend((result.get("verdict") or {}).get("cost", {}).get("usd") or 0.0)
+    except Exception as e:  # noqa: BLE001
+        oplog.add("error", "labissues",
+                  f"triage #{number}: ${(result.get('verdict') or {}).get('cost', {}).get('usd', 0):.4f} "
+                  f"spent but NOT charged to today's budget: {type(e).__name__}: {e}")
+
     try:
         triagelog.record(number, result)
-        # The ledger is charged here rather than inside `triage()` for the same
-        # reason the record is: `triage()` reports what one run did, and what a
-        # day of runs has cost is the caller's ledger to keep. Charged whether
-        # the run succeeded or died — the tokens were billed either way.
-        triagelog.spend((result.get("verdict") or {}).get("cost", {}).get("usd") or 0.0)
     except Exception as e:  # noqa: BLE001 — the run happened; the record is a convenience
         # GitHub already has the verdict, which is the copy that matters. Losing
         # the local one costs a re-read, so this is a warning and not an error.
@@ -665,7 +675,8 @@ def run_triage(number, **kwargs) -> dict:
 AUTO_INTERVAL = 60
 
 
-def eligible(issues: list, label: str = TRIAGED_LABEL) -> list:
+def eligible(issues: list, *, label: str = TRIAGED_LABEL,
+             records: dict | None = None, seen_at=None) -> list:
     """The open issues that have not been triaged, oldest first.
 
     **The gate is the label, and only the label.** Not a timestamp: posting the
@@ -674,14 +685,40 @@ def eligible(issues: list, label: str = TRIAGED_LABEL) -> list:
     advanced to post time silently swallows every human comment that lands in
     the window. Idempotency here has to be a predicate on content.
 
+    Two things then guard the gate itself, because the label is read from a
+    *cached copy* of the tracker and a wrong read here is a second paid run:
+
+    * **A run we could not mark is not retried.** When the label write fails,
+      `triage()` reports `labelled: false` and the issue stays label-free
+      forever — so the label alone would re-run it every pass, which is exactly
+      the retry storm this feature was designed against. A local record saying
+      "we ran this and could not mark it" stops that. Removing the label by
+      hand still works: that record says `labelled: true`.
+    * **A label the cache cannot have seen yet is not believed.** The sweep and
+      this pass are separate threads on the same interval, so a run finishing at
+      T can be followed by a pass reading a cache last filled before T — the
+      label is on the issue, absent from our copy, and the issue is triaged
+      twice. `seen_at` is when that copy was last actually refreshed; a record
+      newer than it means the copy is too old to rule on.
+
     Oldest first so a backlog drains in the order it arrived.
     """
-    out = [i for i in issues or []
-           if i.get("state") != "closed" and label not in (i.get("labels") or [])]
+    records = records or {}
+    out = []
+    for i in issues or []:
+        if i.get("state") == "closed" or label in (i.get("labels") or []):
+            continue
+        rec = records.get(str(i.get("number")))
+        if rec:
+            if rec.get("labelled") is False:
+                continue
+            if not seen_at or (rec.get("ts") or 0) > seen_at:
+                continue
+        out.append(i)
     return sorted(out, key=lambda i: (i.get("created_at") or "", i.get("number") or 0))
 
 
-def auto_triage_once(*, issues=None, run=None, notify=None) -> dict:
+def auto_triage_once(*, issues=None, seen_at=None, run=None, notifier=None) -> dict:
     """One pass of the unattended sweep: triage the oldest eligible issue, or
     explain why not.
 
@@ -703,22 +740,24 @@ def auto_triage_once(*, issues=None, run=None, notify=None) -> dict:
                       "automatic triage is off: the anthropic SDK is not installed")
         return {"ran": None, "skipped": "nosdk"}
 
-    issues = snapshot()["issues"] if issues is None else issues
+    if issues is None:
+        snap = snapshot()
+        issues, seen_at = snap["issues"], snap["changed"]
     run = run or run_triage
-    notify = notify or notify_mod.send
+    notifier = notifier or notify_mod.send
 
     if running()["number"] is not None:
         # A manual run holds the slot. Not an error and not worth a log line —
         # the next pass is 60 seconds away.
         return {"ran": None, "skipped": "busy"}
 
-    todo = eligible(issues)
+    todo = eligible(issues, records=triagelog.summaries(), seen_at=seen_at)
     if not todo:
         return {"ran": None, "skipped": None}
 
-    book = triagelog.ledger()
-    if book["state"] != "ok":
-        _budget_says_no(book, len(todo), notify)
+    budget = triagelog.ledger()
+    if budget["state"] != "ok":
+        _budget_says_no(budget, len(todo), notifier)
         return {"ran": None, "skipped": "budget"}
 
     number = todo[0]["number"]
@@ -730,35 +769,45 @@ def auto_triage_once(*, issues=None, run=None, notify=None) -> dict:
         oplog.add("warn", "labissues", f"automatic triage skipped #{number}: {e}")
         return {"ran": None, "skipped": "busy"}
     except (LookupError, ConnectionError) as e:
-        # A precondition, not a run: no credentials, no such issue, GitHub down.
-        # Nothing was spent and nothing was marked, so this issue is still
-        # eligible — which is correct, and is not a retry of a *run*.
-        oplog.add("error", "labissues", f"automatic triage could not start on #{number}: {e}")
+        # A precondition, not a run: no credentials, a revoked token, GitHub
+        # down. Nothing was spent and nothing was marked, so this issue is still
+        # eligible — correct, and not a retry of a *run*.
+        #
+        # Logged once a day, not once a pass. A revoked token does not resolve
+        # itself, and 1,440 copies of the same line is how an ops log stops
+        # being read — the same reason `sweep()` records its own failures in the
+        # cache rather than the log. Telling somebody is #38's job.
+        if triagelog.mark("logged_start_error"):
+            oplog.add("error", "labissues",
+                      f"automatic triage cannot start: {e} — retrying quietly each "
+                      f"minute; this line will not repeat today")
         return {"ran": None, "skipped": "error"}
     return {"ran": number, "skipped": None}
 
 
-def _budget_says_no(book: dict, waiting: int, notify) -> None:
+def _budget_says_no(budget: dict, waiting: int, notifier) -> None:
     """Say it once per day, at the volume the band deserves.
 
-    Soft only skips, and a skipped pass is invisible; hard means a single run
-    overshot badly enough that somebody should know, which the map settled as
-    the one systemic failure worth a `high` notification.
+    The notification deliberately claims only what is true: the sweep is
+    blocked and issues are waiting. It does *not* claim a run overshot —
+    hand-triggered runs are charged to the same ledger, so the money may have
+    been spent by somebody who meant to.
     """
-    if book["state"] == "soft" and triagelog.mark("logged"):
+    if budget["state"] == "soft" and triagelog.mark("logged"):
         oplog.add("warn", "labissues",
-                  f"automatic triage paused on budget: ${book['usd']:.2f} of today's "
-                  f"${book['soft']:.2f} soft limit spent — {waiting} issue(s) waiting "
+                  f"automatic triage paused on budget: ${budget['usd']:.2f} of today's "
+                  f"${budget['soft']:.2f} soft limit spent — {waiting} issue(s) waiting "
                   f"until midnight")
-    if book["state"] in ("hard", "stopped") and triagelog.mark("notified"):
+    if budget["state"] in ("hard", "stopped") and triagelog.mark("notified"):
         oplog.add("error", "labissues",
-                  f"automatic triage stopped on budget: ${book['usd']:.2f} spent today, "
-                  f"past the ${book['hard']:.2f} hard limit — {waiting} issue(s) waiting")
-        notify(title="ClaudeOS: lab triage stopped on budget",
-               message=(f"Triage has spent ${book['usd']:.2f} today, past the "
-                        f"${book['hard']:.2f} hard limit. No further lab issues will be "
-                        f"triaged until the day resets. {waiting} issue(s) waiting."),
-               priority="high", tags=["money_with_wings"])
+                  f"automatic triage stopped on budget: ${budget['usd']:.2f} spent today, "
+                  f"past the ${budget['hard']:.2f} hard limit — {waiting} issue(s) waiting")
+        notifier(title="ClaudeOS: lab triage stopped on budget",
+                 message=(f"Triage has spent ${budget['usd']:.2f} today, past the "
+                          f"${budget['hard']:.2f} hard limit. Nothing will be triaged "
+                          f"automatically until the day resets; {waiting} issue(s) are "
+                          f"waiting. Triggering a run by hand still works."),
+                 priority="high", tags=["money_with_wings"])
 
 
 # ----------------------------------------------------------- the whole verdict
@@ -791,21 +840,7 @@ def verdict_for(number, *, comments=None) -> dict:
                 "labelled": stored.get("labelled", True),
                 "comment_url": stored.get("comment_url"), "ts": stored.get("ts")}
 
-    if comments is None:
-        repo, token = settings()
-
-        def comments(n):  # noqa: E306 — the default, bound to this run's config
-            return _list_comments(repo, token, n)
-
-    found = None
-    for c in comments(number) or []:
-        if not isinstance(c, dict):
-            continue
-        block = verdict.parse_verdict(c.get("body"))
-        if block:
-            # Last one wins: an issue triaged twice carries two blocks, and the
-            # current verdict is the later one.
-            found = (block, c)
+    found = _latest_triage_comment(number, comments)
     if not found:
         return {**about, "number": number, "source": "none", "verdict": None, "summary": "",
                 "ok": None, "error": None, "labelled": None,
@@ -818,6 +853,29 @@ def verdict_for(number, *, comments=None) -> dict:
             "labelled": None, "comment_url": comment.get("html_url"), "ts": None}
 
 
+def _latest_triage_comment(number: int, comments=None) -> tuple | None:
+    """`(block, comment)` for the newest comment carrying a machine block.
+
+    Last one wins: an issue triaged twice carries two blocks, and the current
+    verdict is the later one. `comments(n) -> list` is the seam; the default
+    resolves the repo and token and asks GitHub.
+    """
+    if comments is None:
+        repo, token = settings()
+
+        def comments(n):  # noqa: E306 — the default, bound to this run's config
+            return _list_comments(repo, token, n)
+
+    found = None
+    for c in comments(number) or []:
+        if not isinstance(c, dict):
+            continue
+        block = verdict.parse_verdict(c.get("body"))
+        if block:
+            found = (block, c)
+    return found
+
+
 def _prose_from_comments(number: int, comments=None) -> str:
     """The prose of the newest triage comment, or "" if it cannot be had.
 
@@ -825,16 +883,8 @@ def _prose_from_comments(number: int, comments=None) -> str:
     so GitHub being unreachable must cost the reasoning, not the card.
     """
     try:
-        if comments is None:
-            repo, token = settings()
-            got = _list_comments(repo, token, number)
-        else:
-            got = comments(number)
-        latest = ""
-        for c in got or []:
-            if isinstance(c, dict) and verdict.parse_verdict(c.get("body")):
-                latest = verdict.prose_of(c.get("body"))
-        return latest
+        found = _latest_triage_comment(number, comments)
+        return verdict.prose_of(found[1].get("body")) if found else ""
     except Exception:  # noqa: BLE001 — a missing paragraph is not a failed page
         return ""
 
