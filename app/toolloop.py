@@ -149,6 +149,17 @@ def system_blocks(prompt: str) -> list:
              "cache_control": {"type": "ephemeral"}}]
 
 
+def _block_type(block) -> str | None:
+    """The `type` of a content block, whichever shape it arrived in.
+
+    `blocks()` returns plain dicts for anything with `model_dump` and the object
+    itself otherwise, so both reach the transcript and either may be inspected.
+    """
+    if isinstance(block, dict):
+        return block.get("type")
+    return getattr(block, "type", None)
+
+
 def blocks(reply) -> list:
     """SDK content blocks → plain wire-format dicts.
 
@@ -255,7 +266,19 @@ def run(client, messages: list, *, schemas: list, system: list,
         usage_last = reply.usage
         run_cost += cost(reply.usage)
         run_output += getattr(reply.usage, "output_tokens", 0) or 0
-        messages.append({"role": "assistant", "content": blocks(reply)})
+        wire = blocks(reply)
+        if reply.stop_reason != "tool_use":
+            # A reply can be cut short *mid tool call*: stop_reason is max_tokens
+            # while the content still carries tool_use blocks the loop will never
+            # dispatch. Left in the transcript those are unpaired, and the API
+            # rejects any later request carrying them ("tool_use ids were found
+            # without tool_result blocks"). Nothing is lost by dropping them —
+            # they were never run, so they hold no evidence.
+            wire = [b for b in wire if _block_type(b) != "tool_use"]
+        if wire:
+            messages.append({"role": "assistant", "content": wire})
+        elif ending or last_step:
+            break   # nothing left to say and nowhere left to say it
 
         if reply.stop_reason == "refusal":
             failure = "Claude declined to answer this request."

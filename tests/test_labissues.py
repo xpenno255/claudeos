@@ -568,6 +568,33 @@ class TriageRunTest(IsolatedDataDirTest):
     API. Covers the two properties that are safety claims rather than
     conveniences: no write tool is ever offered, and the run ends in data."""
 
+    def test_a_reply_truncated_mid_tool_call_does_not_poison_the_transcript(self):
+        """The first live run died on this. A reply can hit the token cap while
+        it is still emitting tool calls: stop_reason is max_tokens, but the
+        content carries tool_use blocks the loop will never dispatch. Left in
+        the transcript they are unpaired, and the API rejects the next request
+        with "tool_use ids were found without tool_result blocks"."""
+        client = FakeClient([
+            FakeReply([FakeBlock(type="text", text="checking the mesh"),
+                       FakeBlock(type="tool_use", name="ha_zha_devices", input={}, id="tu_a"),
+                       FakeBlock(type="tool_use", name="ha_error_log", input={}, id="tu_b")],
+                      stop_reason="max_tokens"),
+            FakeReply([FakeBlock(type="text", text=json.dumps(VERDICT))]),
+        ])
+
+        result = self.labissues.triage(1, issue=ISSUE, client=client,
+                                       comment=self.tracker.comment,
+                                       label=self.tracker.label)
+
+        sent = [b for call in client.calls for m in call["messages"]
+                for b in (m["content"] if isinstance(m["content"], list) else [])]
+        unpaired = [b for b in sent
+                    if (b.get("type") if isinstance(b, dict) else getattr(b, "type", None))
+                    == "tool_use"]
+        self.assertEqual(unpaired, [], "an undispatched tool_use reached the wire")
+        self.assertTrue(result["ok"], f"the run failed: {result['error']}")
+        self.assertEqual(result["verdict"]["verdict"], VERDICT["verdict"])
+
     def test_the_run_offers_no_write_tool_and_ends_in_a_parsed_verdict(self):
         # A tool call, then prose (the ordinary ending — the model has stopped
         # asking for tools well before the ceiling), then the structured answer.
