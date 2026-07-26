@@ -106,6 +106,29 @@ _Avoid_ treating it as a spend ledger. Last-write-wins loses the cost of a
 replaced run by design; the daily budget ledger is a different question and gets
 its own key in the same file.
 
+### Daily budget
+
+**What unattended triage may spend in one local calendar day**, in three bands
+owned by `app/triagelog.py`: **soft** ($2), **hard** ($4), **stop** ($8).
+
+| Band | What happens |
+| --- | --- |
+| soft | No new automatic run starts. Logged once, not once a minute. |
+| hard | Notifies at `high` — a single run overshot badly enough to need a human. |
+| stop | Automatic triage is off until the day resets. |
+
+Soft is the only band a healthy install meets, because no run starts above it;
+the two above exist for **overshoot**, since one run started just under soft can
+cost $3–5 by itself. Reset is by comparing the stored date to today's, so
+"until the day resets" needs nothing running at midnight to come true.
+
+**It bounds the unattended sweep, not the person.** A hand-triggered run from
+the queue is a human deciding to spend and is never blocked — the budget exists
+because nobody is watching the automatic ones.
+
+Failed runs count. The tokens were billed; a ledger that counted only successes
+would under-report exactly the runs most likely to be repeated.
+
 ### Read-only
 
 In the context of triage, **read-only always means against the lab** —

@@ -177,6 +177,16 @@ def comment_body(block: dict, prose: str) -> str:
     return f"{prose.strip()}\n\n<!-- {MARKER}\n{payload}\n-->\n"
 
 
+def prose_of(body: str | None) -> str:
+    """The human half of a triage comment — everything but the block.
+
+    The pair with `comment_body`: that joins prose to block, this takes them
+    apart again. Needed because a verdict read back from GitHub has to render
+    the reasoning as well as the fields, and the reasoning is not in the block.
+    """
+    return _BLOCK_RE.sub("", body or "").strip()
+
+
 def parse_verdict(body: str | None) -> dict | None:
     """The machine block in a comment, or None when there is not a usable one.
 

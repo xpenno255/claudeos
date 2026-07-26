@@ -35,6 +35,7 @@ import re
 import threading
 import time
 
+from . import notify as notify_mod
 from . import oplog, store, sweeper, triagelog, verdict, toolloop, tools
 from .httpclient import HttpError, request
 
@@ -557,7 +558,11 @@ def triage(number, *, issue=None, analyse=None, comment=None, label=None,
               f"({block['confidence']} confidence, {block['severity']}) "
               f"${block['cost']['usd']:.4f}" + (f" — {error}" if error else ""))
     return {"number": number, "title": issue.get("title"), "ok": error is None,
-            "verdict": block, "error": error, "unposted": unposted,
+            # The prose as well as the block. The block deliberately has no
+            # `summary` — it is the half a human reads — but the detail card
+            # renders both, and re-reading GitHub for text this process just
+            # wrote would be silly.
+            "verdict": block, "summary": prose, "error": error, "unposted": unposted,
             "labelled": labelled, "unlabelled": unlabelled, "label": TRIAGED_LABEL,
             "comment_url": posted.get("html_url") if isinstance(posted, dict) else None}
 
@@ -638,6 +643,11 @@ def run_triage(number, **kwargs) -> dict:
 
     try:
         triagelog.record(number, result)
+        # The ledger is charged here rather than inside `triage()` for the same
+        # reason the record is: `triage()` reports what one run did, and what a
+        # day of runs has cost is the caller's ledger to keep. Charged whether
+        # the run succeeded or died — the tokens were billed either way.
+        triagelog.spend((result.get("verdict") or {}).get("cost", {}).get("usd") or 0.0)
     except Exception as e:  # noqa: BLE001 — the run happened; the record is a convenience
         # GitHub already has the verdict, which is the copy that matters. Losing
         # the local one costs a re-read, so this is a warning and not an error.
@@ -646,6 +656,221 @@ def run_triage(number, **kwargs) -> dict:
     return result
 
 
+# ------------------------------------------------------ triage without asking
+
+# Its own thread rather than a step inside `sweep`. A run takes minutes, and
+# bolting it onto the 60s sweep would freeze the queue's own refresh for the
+# duration — the page would show a stale backlog while the thing it is waiting
+# for happens. The two share nothing but the cache they read.
+AUTO_INTERVAL = 60
+
+
+def eligible(issues: list, label: str = TRIAGED_LABEL) -> list:
+    """The open issues that have not been triaged, oldest first.
+
+    **The gate is the label, and only the label.** Not a timestamp: posting the
+    triage comment bumps the issue's own `updated_at`, so a watermark anchored
+    at fetch time matches forever and re-triages indefinitely, while one
+    advanced to post time silently swallows every human comment that lands in
+    the window. Idempotency here has to be a predicate on content.
+
+    Oldest first so a backlog drains in the order it arrived.
+    """
+    out = [i for i in issues or []
+           if i.get("state") != "closed" and label not in (i.get("labels") or [])]
+    return sorted(out, key=lambda i: (i.get("created_at") or "", i.get("number") or 0))
+
+
+def auto_triage_once(*, issues=None, run=None, notify=None) -> dict:
+    """One pass of the unattended sweep: triage the oldest eligible issue, or
+    explain why not.
+
+    Takes at most one issue per pass. A backlog of eight drains over eight
+    passes rather than firing eight expensive runs at once — which also means
+    there is never a second run to race the ledger.
+
+    Returns `{"ran": number|None, "skipped": reason|None}`; `skipped` is None
+    when there was simply nothing to do, because a stalled queue and an idle one
+    must not look the same.
+    """
+    # The SDK is the default runner's precondition, not the pass's — the same
+    # split `triage()` makes, and what lets this be driven by a fake.
+    if run is None and not HAS_SDK:
+        # Stated once, not once a minute. Triage is simply unavailable, exactly
+        # as chat is, and the queue says so from `triage_available`.
+        if triagelog.mark("logged_nosdk"):
+            oplog.add("warn", "labissues",
+                      "automatic triage is off: the anthropic SDK is not installed")
+        return {"ran": None, "skipped": "nosdk"}
+
+    issues = snapshot()["issues"] if issues is None else issues
+    run = run or run_triage
+    notify = notify or notify_mod.send
+
+    if running()["number"] is not None:
+        # A manual run holds the slot. Not an error and not worth a log line —
+        # the next pass is 60 seconds away.
+        return {"ran": None, "skipped": "busy"}
+
+    todo = eligible(issues)
+    if not todo:
+        return {"ran": None, "skipped": None}
+
+    book = triagelog.ledger()
+    if book["state"] != "ok":
+        _budget_says_no(book, len(todo), notify)
+        return {"ran": None, "skipped": "budget"}
+
+    number = todo[0]["number"]
+    try:
+        run(number)
+    except ValueError as e:
+        # The slot was taken between the check and the call, or the number was
+        # rejected. Either way the next pass tries again; nothing was spent.
+        oplog.add("warn", "labissues", f"automatic triage skipped #{number}: {e}")
+        return {"ran": None, "skipped": "busy"}
+    except (LookupError, ConnectionError) as e:
+        # A precondition, not a run: no credentials, no such issue, GitHub down.
+        # Nothing was spent and nothing was marked, so this issue is still
+        # eligible — which is correct, and is not a retry of a *run*.
+        oplog.add("error", "labissues", f"automatic triage could not start on #{number}: {e}")
+        return {"ran": None, "skipped": "error"}
+    return {"ran": number, "skipped": None}
+
+
+def _budget_says_no(book: dict, waiting: int, notify) -> None:
+    """Say it once per day, at the volume the band deserves.
+
+    Soft only skips, and a skipped pass is invisible; hard means a single run
+    overshot badly enough that somebody should know, which the map settled as
+    the one systemic failure worth a `high` notification.
+    """
+    if book["state"] == "soft" and triagelog.mark("logged"):
+        oplog.add("warn", "labissues",
+                  f"automatic triage paused on budget: ${book['usd']:.2f} of today's "
+                  f"${book['soft']:.2f} soft limit spent — {waiting} issue(s) waiting "
+                  f"until midnight")
+    if book["state"] in ("hard", "stopped") and triagelog.mark("notified"):
+        oplog.add("error", "labissues",
+                  f"automatic triage stopped on budget: ${book['usd']:.2f} spent today, "
+                  f"past the ${book['hard']:.2f} hard limit — {waiting} issue(s) waiting")
+        notify(title="ClaudeOS: lab triage stopped on budget",
+               message=(f"Triage has spent ${book['usd']:.2f} today, past the "
+                        f"${book['hard']:.2f} hard limit. No further lab issues will be "
+                        f"triaged until the day resets. {waiting} issue(s) waiting."),
+               priority="high", tags=["money_with_wings"])
+
+
+# ----------------------------------------------------------- the whole verdict
+
+def verdict_for(number, *, comments=None) -> dict:
+    """Everything the detail card renders for one issue.
+
+    Prefers the local record, falls back to reading it back out of the issue's
+    own comments. The fallback is not a nicety: the record is a convenience a
+    `data/` wipe may destroy, and the machine block exists precisely so the
+    verdict survives in the place a human can also read it. An issue carrying
+    the triaged label whose verdict is only on GitHub must still open.
+
+    `source` says which it was, because "we ran this" and "we read this back"
+    are different claims and the card says so.
+    """
+    number = int(number)
+    about = _issue_facts(number)
+    stored = triagelog.get(number)
+    if stored and isinstance(stored.get("verdict"), dict):
+        # A record written before the prose was kept locally still has prose —
+        # on GitHub, in the comment, which is the copy that was always the real
+        # one. Worth one request on a detail view to not show a verdict with its
+        # reasoning missing.
+        prose = stored.get("summary") or _prose_from_comments(number, comments)
+        return {**about, "number": number, "source": "local",
+                "title": stored.get("title") or about.get("title"),
+                "verdict": stored["verdict"], "summary": prose,
+                "ok": bool(stored.get("ok")), "error": stored.get("error"),
+                "labelled": stored.get("labelled", True),
+                "comment_url": stored.get("comment_url"), "ts": stored.get("ts")}
+
+    if comments is None:
+        repo, token = settings()
+
+        def comments(n):  # noqa: E306 — the default, bound to this run's config
+            return _list_comments(repo, token, n)
+
+    found = None
+    for c in comments(number) or []:
+        if not isinstance(c, dict):
+            continue
+        block = verdict.parse_verdict(c.get("body"))
+        if block:
+            # Last one wins: an issue triaged twice carries two blocks, and the
+            # current verdict is the later one.
+            found = (block, c)
+    if not found:
+        return {**about, "number": number, "source": "none", "verdict": None, "summary": "",
+                "ok": None, "error": None, "labelled": None,
+                "comment_url": None, "ts": None}
+
+    block, comment = found
+    return {**about, "number": number, "source": "github", "verdict": block,
+            "summary": verdict.prose_of(comment.get("body")),
+            "ok": "error" not in block, "error": block.get("error"),
+            "labelled": None, "comment_url": comment.get("html_url"), "ts": None}
+
+
+def _prose_from_comments(number: int, comments=None) -> str:
+    """The prose of the newest triage comment, or "" if it cannot be had.
+
+    Best effort by design: this only ever supplements a verdict already in hand,
+    so GitHub being unreachable must cost the reasoning, not the card.
+    """
+    try:
+        if comments is None:
+            repo, token = settings()
+            got = _list_comments(repo, token, number)
+        else:
+            got = comments(number)
+        latest = ""
+        for c in got or []:
+            if isinstance(c, dict) and verdict.parse_verdict(c.get("body")):
+                latest = verdict.prose_of(c.get("body"))
+        return latest
+    except Exception:  # noqa: BLE001 — a missing paragraph is not a failed page
+        return ""
+
+
+def _issue_facts(number: int) -> dict:
+    """The issue's own title and URL, from the sweep cache — best effort.
+
+    Best effort on purpose: the card is about the verdict, and an unconfigured
+    or not-yet-swept install must still render one it holds locally rather than
+    failing on a missing link.
+    """
+    for i in snapshot()["issues"]:
+        if i.get("number") == number:
+            return {"title": i.get("title"), "issue_url": i.get("html_url")}
+    try:
+        repo, _ = settings()
+        return {"title": None, "issue_url": f"https://github.com/{repo}/issues/{number}"}
+    except (LookupError, ValueError):
+        return {"title": None, "issue_url": None}
+
+
+def _list_comments(repo: str, token: str, number: int) -> list:
+    """Every comment on one issue. Only ever called for a detail view, so the
+    page-size cap is the same judgement as the sweep's: an issue with more than
+    100 comments is not one this card is going to render usefully anyway."""
+    try:
+        got = _get(f"/repos/{repo}/issues/{number}/comments?per_page={PAGE_SIZE}", token)
+    except HttpError as e:
+        if e.status == 404:
+            raise LookupError(f"no issue #{number} in {repo}") from e
+        raise _explain(e, repo) from e
+    return got if isinstance(got, list) else []
+
+
 def start() -> None:
     sweeper.spawn("labissues", sweep, SWEEP_INTERVAL,
                   system="labissues", error="lab issues sweep failed")
+    sweeper.spawn("labtriage", auto_triage_once, AUTO_INTERVAL,
+                  system="labissues", error="automatic triage pass failed")

@@ -785,5 +785,297 @@ class RunTriageTest(IsolatedDataDirTest):
         self.assertTrue(self.dispatch()["ok"], "the slot stayed held after a failure")
 
 
+# ---------------------------------------------------------------- #36: the sweep
+
+def issues(*specs):
+    """Open issues in the cache's shape. `specs` are (number, labels, updated)."""
+    return [{"number": n, "title": f"issue {n}", "state": "open", "labels": list(labels),
+             "body": "", "created_at": f"2026-07-{n:02d}T00:00:00Z",
+             "updated_at": updated or f"2026-07-{n:02d}T00:00:00Z",
+             "html_url": f"https://github.com/x/y/issues/{n}"}
+            for n, labels, updated in specs]
+
+
+class AutoTriageTest(IsolatedDataDirTest):
+    """The unattended sweep. Every test here is about something that costs money
+    when it goes wrong, which is why this module has a seam at all."""
+
+    def setUp(self):
+        super().setUp()
+        self.ran = []
+
+    def runner(self, cost=0.40, ok=True):
+        """A stand-in for a triage run: records the issue and what it spent."""
+        def _run(number, **kw):
+            self.ran.append(number)
+            block = _verdict.machine_block(
+                None if not ok else dict(VERDICT),
+                cost={"input": 1000, "output": 100, "usd": cost},
+                error=None if ok else "the API is down")
+            result = {"number": number, "title": "t", "ok": ok, "verdict": block,
+                      "error": None if ok else "the API is down", "unposted": None,
+                      "labelled": True, "unlabelled": None,
+                      "label": self.labissues.TRIAGED_LABEL, "comment_url": None,
+                      "summary": "prose"}
+            self.triagelog.record(number, result)
+            self.triagelog.spend(block["cost"]["usd"])
+            return result
+        return _run
+
+    def sweep_once(self, *specs, **kw):
+        kw.setdefault("run", self.runner())
+        return self.labissues.auto_triage_once(issues=issues(*specs), **kw)
+
+    # ------------------------------------------------------------ selection
+
+    def test_an_untriaged_issue_is_picked_up_without_being_asked(self):
+        self.sweep_once((1, [], None))
+
+        self.assertEqual(self.ran, [1])
+
+    def test_a_marked_issue_is_never_triaged_again(self):
+        """The label is the whole idempotency mechanism. If it stops gating,
+        every sweep pays to re-triage the entire backlog, forever."""
+        self.sweep_once((1, [self.labissues.TRIAGED_LABEL], None))
+
+        self.assertEqual(self.ran, [], "a marked issue was triaged again")
+
+    def test_removing_the_label_makes_an_issue_eligible_again(self):
+        """The documented way to ask for another look."""
+        self.sweep_once((1, [self.labissues.TRIAGED_LABEL], None))
+        self.sweep_once((1, [], None))
+
+        self.assertEqual(self.ran, [1])
+
+    def test_a_new_comment_does_not_cause_a_re_triage(self):
+        """**The single most important test in this ticket.** Posting the triage
+        comment bumps the issue's own updated_at, so any watermark on time either
+        re-triages forever or silently swallows the human comments that arrive in
+        the window. Idempotency is a predicate on content — the label — and this
+        test fails the moment someone reintroduces a timestamp."""
+        marked = [self.labissues.TRIAGED_LABEL]
+        self.sweep_once((1, marked, "2026-07-25T00:00:00Z"))
+        # A human replies; the issue's timestamp moves far past anything the
+        # sweep could have recorded.
+        self.sweep_once((1, marked, "2099-01-01T00:00:00Z"))
+
+        self.assertEqual(self.ran, [], "a comment bump re-triaged a marked issue")
+
+    def test_only_one_issue_is_taken_per_pass(self):
+        """A backlog of eight drains over eight passes rather than firing eight
+        expensive runs at once."""
+        self.sweep_once((1, [], None), (2, [], None), (3, [], None))
+
+        self.assertEqual(len(self.ran), 1)
+
+    def test_the_oldest_untriaged_issue_goes_first(self):
+        self.sweep_once((3, [], None), (1, [], None), (2, [], None))
+
+        self.assertEqual(self.ran, [1], "the queue is not draining oldest first")
+
+    def test_a_pass_does_nothing_while_another_run_holds_the_slot(self):
+        """Manual and automatic runs share one slot, so the sweep must not even
+        try while a human-triggered run is in flight."""
+        started, release = threading.Event(), threading.Event()
+
+        def slow(issue):
+            started.set()
+            release.wait(5)
+            return dict(VERDICT), dict(SPEND)
+
+        manual = threading.Thread(target=lambda: self.labissues.run_triage(
+            9, issue=ISSUE, analyse=slow,
+            comment=self.tracker.comment, label=self.tracker.label))
+        manual.start()
+        try:
+            self.assertTrue(started.wait(5))
+            outcome = self.labissues.auto_triage_once(issues=issues((1, [], None)),
+                                                      run=self.labissues.run_triage)
+            self.assertEqual(self.ran, [])
+            self.assertEqual(outcome["skipped"], "busy")
+        finally:
+            release.set()
+            manual.join(5)
+
+    # --------------------------------------------------------------- budget
+
+    def test_a_pass_is_skipped_once_the_soft_limit_is_reached(self):
+        self.triagelog.spend(self.triagelog.SOFT_USD)
+
+        outcome = self.sweep_once((1, [], None))
+
+        self.assertEqual(self.ran, [], "a run started over the soft limit")
+        self.assertEqual(outcome["skipped"], "budget")
+        self.assertEqual(self.triagelog.ledger()["state"], "soft")
+
+    def test_the_soft_limit_logs_once_a_day_and_not_once_a_minute(self):
+        """The sweep runs every minute. A line per skipped pass is 1,440 lines a
+        day of the same sentence, which is how an ops log stops being read."""
+        self.triagelog.spend(self.triagelog.SOFT_USD)
+
+        for _ in range(3):
+            self.sweep_once((1, [], None))
+
+        lines = [e for e in _oplog.recent(200)
+                 if "budget" in e.get("message", "") and e.get("system") == "labissues"]
+        self.assertEqual(len(lines), 1, f"logged {len(lines)} times, not once")
+
+    def test_the_hard_limit_notifies(self):
+        """Soft only skips, and a skipped sweep is invisible. Crossing hard means
+        one run overshot badly enough to need a human to know."""
+        sent = []
+        self.triagelog.spend(self.triagelog.HARD_USD)
+
+        self.sweep_once((1, [], None), notify=lambda **kw: sent.append(kw))
+
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["priority"], "high")
+        self.assertEqual(self.triagelog.ledger()["state"], "hard")
+
+    def test_the_hard_limit_notifies_once_a_day_and_not_once_a_minute(self):
+        sent = []
+        self.triagelog.spend(self.triagelog.HARD_USD)
+
+        for _ in range(3):
+            self.sweep_once((1, [], None), notify=lambda **kw: sent.append(kw))
+
+        self.assertEqual(len(sent), 1)
+
+    def test_twice_the_hard_limit_stops_triage_until_the_day_resets(self):
+        self.triagelog.spend(self.triagelog.HARD_USD * 2)
+
+        self.sweep_once((1, [], None))
+
+        self.assertEqual(self.ran, [])
+        self.assertEqual(self.triagelog.ledger()["state"], "stopped")
+
+    def test_the_ledger_resets_when_the_day_rolls_over(self):
+        """"Until reset" has to mean something. Yesterday's spend must not keep
+        triage switched off this morning."""
+        yesterday = time.time() - 86400
+        self.triagelog.spend(self.triagelog.HARD_USD * 2, ts=yesterday)
+
+        self.assertEqual(self.triagelog.ledger()["usd"], 0.0)
+        self.sweep_once((1, [], None))
+        self.assertEqual(self.ran, [1])
+
+    def test_a_failed_run_still_costs_the_budget(self):
+        """A run that dies has already been billed for every token it spent. A
+        ledger that only counts successes under-reports exactly the runs that
+        are most likely to repeat."""
+        self.sweep_once((1, [], None), run=self.runner(cost=0.5, ok=False))
+
+        self.assertAlmostEqual(self.triagelog.ledger()["usd"], 0.5)
+
+    def test_a_failed_run_is_not_retried(self):
+        """The weekly report's retry storm is the precedent this must not
+        reproduce: the marker goes on either way, so the issue leaves the queue."""
+        self.sweep_once((1, [], None), run=self.runner(ok=False))
+        # The failed run marked the issue, exactly as a successful one does.
+        self.sweep_once((1, [self.labissues.TRIAGED_LABEL], None))
+
+        self.assertEqual(self.ran, [1], "a failed run was retried")
+
+    def test_a_pass_with_nothing_to_do_is_not_a_budget_skip(self):
+        """A stalled queue and an idle one must not look the same to the UI."""
+        outcome = self.sweep_once((1, [self.labissues.TRIAGED_LABEL], None))
+
+        self.assertIsNone(outcome["skipped"])
+        self.assertEqual(self.triagelog.ledger()["state"], "ok")
+
+
+# ------------------------------------------------------- #37: the whole verdict
+
+class VerdictDetailTest(IsolatedDataDirTest):
+    """`verdict_for()` — everything the detail card renders, from the local
+    record when there is one and from GitHub when there is not."""
+
+    def test_a_stored_run_is_returned_whole(self):
+        self.labissues.run_triage(1, issue=ISSUE, analyse=analysis(),
+                                  comment=self.tracker.comment, label=self.tracker.label)
+
+        got = self.labissues.verdict_for(1)
+
+        self.assertEqual(got["source"], "local")
+        self.assertEqual(got["verdict"]["verdict"], "refuted")
+        self.assertEqual([e["status"] for e in got["verdict"]["evidence"]],
+                         ["success", "no_data", "truncated", "excluded"])
+        self.assertEqual(got["verdict"]["refuted"], VERDICT["refuted"])
+        self.assertEqual(got["verdict"]["remediation"]["kind"], "diagnostic")
+
+    def test_the_prose_survives_into_the_record(self):
+        """The machine block deliberately has no `summary` — the prose is the
+        half a human reads. The card renders both, so the record has to keep it."""
+        self.labissues.run_triage(1, issue=ISSUE, analyse=analysis(),
+                                  comment=self.tracker.comment, label=self.tracker.label)
+
+        self.assertEqual(self.labissues.verdict_for(1)["summary"], VERDICT["summary"])
+
+    def test_a_record_written_before_the_prose_was_kept_recovers_it_from_github(self):
+        """Records predating the prose field still have prose — in the comment,
+        which was always the copy that mattered. Showing a verdict with its
+        reasoning missing, when one request would fetch it, is not good enough."""
+        self.labissues.run_triage(1, issue=ISSUE, analyse=analysis(),
+                                  comment=self.tracker.comment, label=self.tracker.label)
+        stored = self.triagelog.get(1)
+        del stored["summary"]                       # as an older ClaudeOS wrote it
+        self.triagelog.record(1, stored)
+
+        got = self.labissues.verdict_for(
+            1, comments=lambda n: [{"body": self.tracker.body}])
+
+        self.assertEqual(got["source"], "local", "the local record is still the record")
+        self.assertEqual(got["summary"], VERDICT["summary"])
+
+    def test_the_card_still_opens_when_the_missing_prose_cannot_be_fetched(self):
+        """GitHub being unreachable costs the reasoning, not the page."""
+        self.labissues.run_triage(1, issue=ISSUE, analyse=analysis(),
+                                  comment=self.tracker.comment, label=self.tracker.label)
+        stored = self.triagelog.get(1)
+        del stored["summary"]
+        self.triagelog.record(1, stored)
+
+        def dead(_n):
+            raise ConnectionError("GitHub is down")
+
+        got = self.labissues.verdict_for(1, comments=dead)
+
+        self.assertEqual(got["summary"], "")
+        self.assertEqual(got["verdict"]["verdict"], "refuted")
+
+    def test_a_verdict_this_install_never_ran_is_read_back_from_github(self):
+        """GitHub is the source of truth: a data/ wipe, or a run from another
+        install, leaves a labelled issue whose verdict is only in the comment."""
+        block = _verdict.machine_block(dict(VERDICT), cost=dict(SPEND))
+        body = _verdict.comment_body(block, "the prose a human reads")
+
+        got = self.labissues.verdict_for(
+            1, comments=lambda n: [{"body": "a human asking a question"},
+                                   {"body": body,
+                                    "html_url": "https://github.com/x/y/issues/1#c9"}])
+
+        self.assertEqual(got["source"], "github")
+        self.assertEqual(got["verdict"], block)
+        self.assertEqual(got["summary"], "the prose a human reads")
+        self.assertEqual(got["comment_url"], "https://github.com/x/y/issues/1#c9")
+
+    def test_the_most_recent_block_wins_when_an_issue_was_triaged_twice(self):
+        older = _verdict.comment_body(
+            _verdict.machine_block({**VERDICT, "verdict": "inconclusive"}), "first look")
+        newer = _verdict.comment_body(
+            _verdict.machine_block({**VERDICT, "verdict": "diagnosed"}), "second look")
+
+        got = self.labissues.verdict_for(
+            1, comments=lambda n: [{"body": older}, {"body": newer}])
+
+        self.assertEqual(got["verdict"]["verdict"], "diagnosed")
+
+    def test_an_issue_with_no_verdict_anywhere_says_so_rather_than_inventing_one(self):
+        got = self.labissues.verdict_for(1, comments=lambda n: [{"body": "just a human"}])
+
+        self.assertIsNone(got["verdict"])
+        self.assertEqual(got["source"], "none")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -111,7 +111,9 @@ def route_lab_issues(_m, _p, _b):
     # label, and show it in every open tab rather than only the one that asked.
     return {**labissues.snapshot(), "triage_available": labissues.HAS_SDK,
             "triage_label": labissues.TRIAGED_LABEL, "model": labissues.MODEL,
-            "triage_running": labissues.running(), "triage": triagelog.summaries()}
+            "triage_running": labissues.running(), "triage": triagelog.summaries(),
+            # A queue stalled on budget must not look like an idle one.
+            "budget": triagelog.ledger()}
 
 
 def route_lab_triage(_m, p, _b):
@@ -124,6 +126,16 @@ def route_lab_triage(_m, p, _b):
     or another run already holds the slot).
     """
     return labissues.run_triage(p["number"])
+
+
+def route_lab_verdict(_m, p, _b):
+    """The whole verdict for one issue, for the detail card.
+
+    Reads the local record where there is one and the issue's own comments
+    where there is not — GitHub is the source of truth, and a labelled issue
+    whose verdict this install never produced must still open.
+    """
+    return labissues.verdict_for(p["number"])
 
 
 def route_poll_now(_m, _p, _b):
@@ -412,6 +424,7 @@ ROUTES = [
     ("POST",   r"^/api/poll$",                                            route_poll_now),
     ("GET",    r"^/api/labissues$",                                       route_lab_issues),
     ("POST",   r"^/api/labissues/(?P<number>\d+)/triage$",                route_lab_triage),
+    ("GET",    r"^/api/labissues/(?P<number>\d+)/verdict$",               route_lab_verdict),
     ("GET",    r"^/api/unifi/devices$",                                   route_unifi_devices),
     ("GET",    r"^/api/unifi/clients$",                                   route_unifi_clients),
     ("GET",    r"^/api/unifi/insights$",                                  route_unifi_insights),

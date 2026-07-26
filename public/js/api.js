@@ -83,4 +83,5 @@ export const api = {
 
   labIssues:       ()            => call("GET",    "/api/labissues"),
   labTriage:       (n)           => call("POST",   `/api/labissues/${n}/triage`),
+  labVerdict:      (n)           => call("GET",    `/api/labissues/${n}/verdict`),
 };

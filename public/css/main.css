@@ -343,6 +343,12 @@ tbody td {
 }
 tbody tr:hover td { background: rgba(126,178,209,0.045); }
 tbody td.strong { color: var(--ink); }
+/* A row title that opens a detail route. Underlined-blue is the one thing in
+   this UI that looks like it came from somewhere else. */
+tbody td a.strong {
+  color: var(--ink); text-decoration: none; border-bottom: 1px dotted var(--hairline-2);
+}
+tbody td a.strong:hover { color: var(--amber); border-bottom-color: var(--amber); }
 td .actions { display: flex; gap: 6px; justify-content: flex-end; }
 .num { text-align: right; }
 
@@ -418,6 +424,24 @@ td .actions { display: flex; gap: 6px; justify-content: flex-end; }
   font-size: 12.5px; color: var(--ink-2); border: 1px dashed var(--hairline-2);
   padding: 10px 14px; margin-bottom: 14px; line-height: 1.6;
 }
+/* Triage prose arrives as markdown and nothing here renders markdown, so keep
+   the author's own line breaks rather than collapsing it into one block. */
+.ai-summary.prose { white-space: pre-wrap; color: var(--ink); }
+
+/* Triage remediation. Deliberately NOT .finding-fix, whose ::before hardcodes
+   "FIX:" — the honest output of a real run was a diagnostic, and a schema that
+   presents one as a repair is the failure mode this card exists to avoid. The
+   kind is the label. */
+.remedy {
+  font-size: 12px; color: var(--ink); padding: 7px 10px; border-left: 2px solid var(--ink-3);
+}
+.remedy::before { font-family: var(--font-display); font-size: 9.5px; letter-spacing: .15em; }
+.remedy.fix        { background: var(--amber-dim); border-left-color: var(--amber); }
+.remedy.fix::before        { content: "▸ FIX: ";        color: var(--amber); }
+.remedy.diagnostic { background: var(--cyan-dim);  border-left-color: var(--cyan); }
+.remedy.diagnostic::before { content: "▸ DIAGNOSTIC — NOT A FIX: "; color: var(--cyan); }
+.remedy.none       { color: var(--ink-2); }
+.remedy.none::before       { content: "▸ NOTHING TO DO: "; color: var(--ink-3); }
 .grade-badge {
   font-family: var(--font-display); font-size: 26px; font-weight: 700;
   width: 46px; height: 46px; display: inline-flex; align-items: center; justify-content: center;

@@ -80,7 +80,14 @@ async function drain(toast) {
 
 // ---------------------------------------------------------------- the view
 
-export async function renderLabIssues(root, _args, { toast }) {
+export async function renderLabIssues(root, args, { toast }) {
+  // `#/labissues/<n>` is the detail card. The hash router already splits the
+  // argument off, so the route costs nothing but this branch.
+  if (args && args[0]) return renderVerdict(root, args[0]);
+  return renderQueue(root, toast);
+}
+
+async function renderQueue(root, toast) {
   let snap = null;
 
   function paint() {
@@ -196,8 +203,10 @@ function queue(snap, issues, toast) {
         ? el("span", { class: "pill warn" },
             `1 RUNNING${waiting ? ` · ${waiting} QUEUED` : ""}`)
         : null,
+      budgetPill(snap.budget),
       el("span", { class: "mono-dim" }, sweepLine(snap))),
     snap.triage_available === false ? sdkNotice() : null,
+    budgetNotice(snap.budget, count("untriaged")),
     el("div", { class: "panel" },
       el("div", { class: "panel-title" }, `LAB ISSUE QUEUE — ${issues.length} OPEN`),
       table(snap, issues, toast),
@@ -205,6 +214,41 @@ function queue(snap, issues, toast) {
         `A triage run is read-only against the lab: it gathers evidence and posts a verdict `
         + `to the issue, then marks it ${snap.triage_label}. It never changes anything. `
         + `Remove that label on GitHub to make an issue eligible again.`)));
+}
+
+// ---------------------------------------------------------------- the budget
+
+const MONEY = (n) => `$${(Number(n) || 0).toFixed(2)}`;
+
+// Always shown, because "how much has triage spent today" is a question the
+// owner of the API key gets to see the answer to without waiting for it to go
+// wrong.
+function budgetPill(b) {
+  if (!b) return null;
+  const cls = { ok: "neutral", soft: "warn", hard: "err", stopped: "err" }[b.state] || "neutral";
+  return el("span", { class: `pill ${cls}`, title: `soft ${MONEY(b.soft)} · hard `
+    + `${MONEY(b.hard)} · stop ${MONEY(b.stop)} — resets at midnight` },
+    `${MONEY(b.usd)} TODAY${b.runs ? ` · ${b.runs} RUN${b.runs === 1 ? "" : "S"}` : ""}`);
+}
+
+// A queue stalled on budget and an idle one look identical from the rows alone
+// — both just sit there. Only this says which.
+function budgetNotice(b, waiting) {
+  if (!b || b.state === "ok") return null;
+  const stopped = b.state === "stopped";
+  return el("div", { class: "panel", style: `border-left:3px solid var(--${stopped ? "critical" : "warning"})` },
+    el("div", { class: "panel-title" },
+      el("span", { class: `led ${stopped ? "err" : "warn"}` }),
+      stopped ? "AUTOMATIC TRIAGE STOPPED — DAILY BUDGET" : "AUTOMATIC TRIAGE PAUSED — DAILY BUDGET"),
+    el("div", { class: "mono-dim" },
+      `${MONEY(b.usd)} spent today across ${b.runs} run${b.runs === 1 ? "" : "s"}, past the `,
+      el("b", {}, stopped ? `${MONEY(b.stop)} stop limit` : `${MONEY(b.soft)} soft limit`),
+      `. No issue will be triaged automatically until the day resets at midnight`,
+      waiting ? `, and ${waiting} ${waiting === 1 ? "is" : "are"} waiting.` : ".",
+      stopped ? " This is past the hard limit as well, so a notification has gone out." : ""),
+    el("div", { class: "mono-dim", style: "margin-top:8px" },
+      "The queue below is current — this is a spending pause, not a fault. Triggering a "
+      + "run by hand still works: the budget bounds what happens unattended."));
 }
 
 // Triage needs the Anthropic SDK, exactly as chat does. Stated up front, next
@@ -243,15 +287,31 @@ function issueRow(issue, snap, toast) {
   return el("tr", {},
     el("td", {}, el("span", { class: `led ${open ? "ok" : "off"}`, title: open ? "open" : "closed" })),
     el("td", { class: "num mono-dim" }, `#${issue.number ?? "?"}`),
-    el("td", { class: "strong", title: preview(issue.body) }, issue.title || "(untitled)"),
+    el("td", { class: "strong", title: preview(issue.body) }, titleCell(issue, st)),
     el("td", {}, triageCell(st)),
     el("td", { class: "num" }, opened ? timeAgo(opened) : "—"),
     el("td", {}, el("div", { class: "actions" },
       st.kind === "untriaged" ? triggerButton(issue, snap, toast) : null,
+      HAS_VERDICT.has(st.kind)
+        ? el("a", { href: `#/labissues/${issue.number}` },
+            el("button", { class: "btn btn-mini btn-ghost" }, "VERDICT ▸"))
+        : null,
       issue.html_url
         ? el("a", { href: issue.html_url, target: "_blank", rel: "noopener" },
             el("button", { class: "btn btn-mini btn-ghost" }, "GITHUB ↗"))
         : null)));
+}
+
+// The states where a verdict exists to open — including `elsewhere`, where the
+// record is missing locally and the detail route reads it back from GitHub, and
+// `failed`, where what there is to read is why the run died.
+const HAS_VERDICT = new Set(["verdict", "failed", "elsewhere"]);
+
+function titleCell(issue, st) {
+  const title = issue.title || "(untitled)";
+  return HAS_VERDICT.has(st.kind)
+    ? el("a", { href: `#/labissues/${issue.number}`, class: "strong" }, title)
+    : title;
 }
 
 function triggerButton(issue, snap, toast) {
@@ -382,6 +442,189 @@ function unmarked(rec) {
     ? el("span", { class: "pill err", title: "the triaged label could not be applied, so this "
                                             + "issue is still eligible for triage" }, "! NOT MARKED")
     : null;
+}
+
+// ------------------------------------------------------------ the whole verdict
+//
+// What the row cannot say. Three things here are load-bearing and each is a way
+// a verdict stays honest: evidence that came back empty or truncated is shown
+// rather than quietly dropped, evidence deliberately excluded is shown *with
+// its reason* — because a human reading the same log will otherwise reach the
+// conclusion the run rejected — and a diagnostic never renders as a fix.
+
+async function renderVerdict(root, arg) {
+  // The queue's repaint hooks belong to the queue; nothing here is live.
+  view = null;
+  const number = Number(arg);
+  root.replaceChildren(el("div", { class: "ai-running" },
+    el("div", { class: "spinner" }), `reading the verdict on lab issue #${number}…`));
+  try {
+    const got = await api.labVerdict(number);
+    root.replaceChildren(...verdictPanels(number, got));
+  } catch (e) {
+    root.replaceChildren(backLink(),
+      el("div", { class: "panel" },
+        el("div", { class: "panel-title" }, el("span", { class: "led err" }),
+          `LAB ISSUE #${number} — VERDICT UNAVAILABLE`),
+        el("div", { class: "chat-error", style: "text-align:left" }, String(e.message || e))));
+  }
+  return () => {};
+}
+
+function backLink() {
+  return el("div", { class: "ops-toolbar" },
+    el("a", { href: "#/labissues" },
+      el("button", { class: "btn btn-mini btn-ghost" }, "◂ BACK TO THE QUEUE")));
+}
+
+function verdictPanels(number, got) {
+  const v = got.verdict;
+  if (!v) {
+    // Labelled but nothing readable anywhere: an older ClaudeOS, a truncated
+    // write, or a label somebody applied by hand. Say which, do not invent one.
+    return [backLink(), el("div", { class: "panel hero-empty" },
+      el("div", { class: "glyph" }, "◈"),
+      el("h2", {}, "NO VERDICT ON THIS ISSUE"),
+      el("p", {}, `Lab issue #${number} carries no triage verdict — not here, and not in its `,
+        "comments on GitHub. It may have been marked by hand, or triaged by a version of ",
+        "ClaudeOS older than the current machine-block format."),
+      el("a", { href: "#/labissues" },
+        el("button", { class: "btn btn-mini btn-ghost" }, "◂ BACK TO THE QUEUE")))];
+  }
+
+  const failed = Boolean(v.error);
+  const word = VERDICTS[v.verdict] || { glyph: "•", text: String(v.verdict || "?") };
+  const sev = SEVERITIES.has(v.severity) ? v.severity : "info";
+
+  // The left border is the lab issue's severity — except on the failure path,
+  // where there is no assessed severity to show and the card is about the run.
+  return [backLink(), el("div", { class: `finding ${failed ? "critical" : sev}` },
+    el("div", { class: "finding-head" },
+      el("span", { class: `pill ${failed ? "err" : verdictClass(v.verdict, v.severity)}` },
+        failed ? "✕ TRIAGE FAILED" : `${word.glyph} ${word.text}`),
+      // Not on the failure path. A run that died never assessed severity or
+      // confidence — the block carries the cautious defaults, and rendering
+      // them as pills claims a judgement nothing made.
+      failed ? null : el("span", { class: `pill ${sev === "critical" ? "err" : sev === "info" ? "neutral" : "warn"}` },
+        sev.toUpperCase()),
+      failed ? null : el("span", { class: "pill neutral" },
+        `${v.confidence || "?"} confidence`.toUpperCase()),
+      el("span", { class: "finding-title" }, got.title || `LAB ISSUE #${number}`)),
+    el("div", { class: "mono-dim", style: "margin-bottom:10px" }, provenance(got, v)),
+
+    failed ? el("div", { class: "chat-error", style: "text-align:left;margin-bottom:12px" },
+                `The run did not finish: ${v.error}`) : null,
+
+    got.summary
+      ? el("div", { class: "ai-summary prose" }, got.summary)
+      : el("div", { class: "mono-dim", style: "margin-bottom:14px" },
+          "(this verdict carries no prose)"),
+
+    ruledOut(v.refuted),
+    evidencePanel(v.evidence),
+    remediation(v.remediation),
+    machineBlock(v),
+
+    el("div", { class: "ops-toolbar", style: "margin-top:14px" },
+      got.issue_url
+        ? el("a", { href: got.issue_url, target: "_blank", rel: "noopener" },
+            el("button", { class: "btn btn-mini" }, "OPEN THE ISSUE ON GITHUB ↗"))
+        : null,
+      got.comment_url
+        ? el("a", { href: got.comment_url, target: "_blank", rel: "noopener" },
+            el("button", { class: "btn btn-mini btn-ghost" }, "THE TRIAGE COMMENT ↗"))
+        : null,
+      el("a", { href: "#/labissues" },
+        el("button", { class: "btn btn-mini btn-ghost" }, "◂ BACK TO THE QUEUE"))))];
+}
+
+const SEVERITIES = new Set(["critical", "serious", "warning", "info"]);
+
+// "We ran this" and "we read this back out of the issue" are different claims.
+function provenance(got, v) {
+  const cost = (v.cost || {}).usd;
+  const when = got.ts ? `${clockTime(got.ts)} · ${timeAgo(got.ts)}` : null;
+  const bits = [
+    got.source === "github"
+      ? "read back from the issue's own comments — this install did not run it"
+      : "run by this install",
+    when, cost ? `$${Number(cost).toFixed(4)}` : null,
+    got.labelled === false ? "the triaged label was NOT applied — this issue is still eligible" : null,
+  ];
+  return bits.filter(Boolean).join(" · ");
+}
+
+// A refuted hypothesis is a result, not a gap: naming them saves the owner from
+// checking the same thing again.
+function ruledOut(list) {
+  if (!list || !list.length) return null;
+  return el("div", { style: "margin-bottom:14px" },
+    el("div", { class: "mono-dim", style: "margin-bottom:6px" },
+      `RULED OUT — ${list.length} HYPOTHES${list.length === 1 ? "IS" : "ES"}`),
+    ...list.map(h => el("div", { class: "finding-detail", style: "margin-bottom:4px" }, `⊘ ${h}`)));
+}
+
+// status -> how it reads. `no_data` is NOT health: the query worked and found
+// nothing, and reporting that as green is the specific mistake the tool-result
+// semantics in the base prompt exist to prevent.
+const STATUS = {
+  success:   { cls: "ok",      text: "✓ SUCCESS",   note: "data came back" },
+  no_data:   { cls: "warn",    text: "⊘ NO DATA",   note: "the query worked and found nothing — not the same as healthy" },
+  truncated: { cls: "warn",    text: "… TRUNCATED", note: "only part of the result was seen" },
+  excluded:  { cls: "neutral", text: "− EXCLUDED",  note: "looked at and deliberately not relied on" },
+};
+
+function evidencePanel(evidence) {
+  const items = evidence || [];
+  if (!items.length) {
+    return el("div", { class: "mono-dim", style: "margin-bottom:14px" },
+      "NO EVIDENCE RECORDED — the verdict rests on nothing this run wrote down");
+  }
+  const rows = items.map(e => {
+    const s = STATUS[e.status] || { cls: "neutral", text: String(e.status || "?"), note: "" };
+    return el("tr", {},
+      el("td", {}, el("span", { class: `pill ${s.cls}`, title: s.note }, s.text)),
+      el("td", { class: "mono-dim" }, e.tool || "?"),
+      el("td", {}, e.note || ""));
+  });
+  const counts = items.reduce((acc, e) => ({ ...acc, [e.status]: (acc[e.status] || 0) + 1 }), {});
+  const shape = Object.entries(counts).map(([k, n]) => `${n} ${k}`).join(" · ");
+  return el("div", { style: "margin-bottom:14px" },
+    el("div", { class: "mono-dim", style: "margin-bottom:6px" },
+      `EVIDENCE — ${items.length} FINDING${items.length === 1 ? "" : "S"} · ${shape}`),
+    el("div", { class: "table-wrap" },
+      el("table", {},
+        el("thead", {}, el("tr", {},
+          el("th", {}, "STATUS"), el("th", {}, "TOOL"), el("th", {}, "WHAT IT SHOWED"))),
+        el("tbody", {}, ...rows))));
+}
+
+function remediation(rem) {
+  const kind = rem && ["fix", "diagnostic", "none"].includes(rem.kind) ? rem.kind : "none";
+  const text = (rem && rem.text) || "";
+  return el("div", { style: "margin-bottom:4px" },
+    el("div", { class: `remedy ${kind}` },
+      text || (kind === "none" ? "nothing to do — the run found no action worth taking" : "(no text)")),
+    el("div", { class: "mono-dim", style: "margin-top:6px" },
+      "ClaudeOS never runs this. A person reads it and decides."));
+}
+
+// The weekly report's collapsible-panel pattern, used for the one thing that
+// should start hidden — the fields, for anyone checking what the row was built
+// from. Nothing the ticket requires is behind it.
+function machineBlock(v) {
+  const content = el("pre", {
+    class: "mono-dim",
+    style: "display:none;white-space:pre-wrap;font-size:11px;margin:8px 0 0",
+  }, JSON.stringify(v, null, 1));
+  const head = el("div", { class: "mono-dim", style: "cursor:pointer;margin-top:12px" },
+    "▸ THE MACHINE BLOCK");
+  head.addEventListener("click", () => {
+    const hidden = content.style.display === "none";
+    content.style.display = hidden ? "" : "none";
+    head.textContent = hidden ? "▾ THE MACHINE BLOCK" : "▸ THE MACHINE BLOCK";
+  });
+  return el("div", {}, head, content);
 }
 
 // ---------------------------------------------------------------- bits
