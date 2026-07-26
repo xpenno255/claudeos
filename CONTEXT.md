@@ -139,6 +139,53 @@ not be marked (`labelled: false`) is never retried automatically, and a label
 absent from a copy older than the run that would have applied it is not
 believed. Both failures cost a second paid investigation of the same issue.
 
+### Notification volume
+
+**Which lab-issue events are worth interrupting somebody for, and how loudly.**
+Two bands, and the quieter one is the verdict:
+
+| Event | Priority |
+| --- | --- |
+| A `diagnosed` verdict at `critical` or `serious` | `default` |
+| Any other verdict, at any severity | *silent* |
+| One failed run | *silent* — ops log only, which the weekly report sweeps |
+| A dead credential, or the daily budget past `hard` | `high` |
+
+**A verdict is deliberately quieter than a dead credential**, which reads
+backwards until you see why: the owner filed the issue themselves, so they know
+the thing is broken and what is new is only the cause. `high` is reserved across
+this whole app for lab-down and failing hardware, and a triage verdict must not
+arrive at that volume. What *does* page is the pair of states nobody would
+otherwise discover — where the feature has silently stopped working.
+
+**Severity is the gate, and it is the only one.** `notify.send` mutes an
+identical title for five minutes, but these titles carry the issue number, so no
+two are ever equal and the mute can never collapse them.
+
+A dead credential alerts **once per transition, not once per pass** — the sweep
+runs every 60s and none of these states heals, so per-pass would be 1,440 pushes
+a day. A working sweep re-arms it. Transient failures — a timeout, a 5xx, a rate
+limit — are not this, per ADR-0001: GitHub being briefly unreachable is not a lab
+incident. Each stop is explained as itself (`labissues._stopped_because`), because
+sending someone to re-mint a working token when the repo was renamed is worse than
+saying nothing.
+
+### Untriaged too long
+
+**An open lab issue still carrying no verdict 24 hours after it was raised**
+(`labissues.STALE_UNTRIAGED_HOURS`). Automatic triage picks an issue up within a
+minute, so this means triage itself has quietly stopped.
+
+**It has no notification, by design** — it is a backlog signal, not a transition
+— which makes the weekly report the only place it surfaces, and the most likely
+way anyone notices. A fourth state beside the three in **verdict**: not a
+verdict, and not the same as *untriaged* generally.
+
+_Distinguish_ from **`triaged_verdict_unknown`**, which counts issues that *were*
+triaged but whose verdict this install no longer holds (a `data/` wipe). Those are
+not untriaged and not problem-free; their verdicts are on GitHub. Both exist so a
+digest can never read a queue it cannot account for as a queue with nothing in it.
+
 ### Read-only
 
 In the context of triage, **read-only always means against the lab** —

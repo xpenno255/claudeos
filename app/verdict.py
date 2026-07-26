@@ -32,6 +32,10 @@ BLOCK_VERSION = 1
 VERDICTS = ("diagnosed", "refuted", "inconclusive", "no_fault_found")
 CONFIDENCES = ("low", "medium", "high")
 SEVERITIES = ("critical", "serious", "warning", "info")
+# Worst first, and declared here rather than wherever it is needed: the tuple is
+# already in impact order, so anything re-deriving the ranking elsewhere is a
+# second copy of this vocabulary waiting to disagree with it.
+SEVERITY_ORDER = {name: i for i, name in enumerate(SEVERITIES)}
 EVIDENCE_STATUSES = ("success", "no_data", "truncated", "excluded")
 REMEDIATION_KINDS = ("fix", "diagnostic", "none")
 

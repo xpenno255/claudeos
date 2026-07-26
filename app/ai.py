@@ -315,6 +315,10 @@ outstanding work, not as system health:
   about ClaudeOS, not about the lab.
 - `failed_runs` counts runs that broke rather than concluded, and `budget_state` other
   than "ok" means automatic triage is paused on spend. Either is worth a mention.
+- `triaged_verdict_unknown` counts issues that were triaged but whose verdict this
+  install no longer holds. They are NOT untriaged and NOT problem-free — their verdicts
+  are on GitHub. Never read a low `by_verdict` total as "nothing was found" when this
+  number is high.
 
 Rules:
 - Be specific: quote the actual numbers, names and IPs from the data. Never pad.

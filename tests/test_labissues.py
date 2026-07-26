@@ -1269,6 +1269,42 @@ class CredentialAlertTest(IsolatedDataDirTest):
 
         self.assertEqual(told.sent, [])
 
+    def test_a_403_with_no_limit_headers_is_a_permissions_problem(self):
+        """A 403 whose headers do not say the limit is exhausted is the token
+        missing the Issues permission — permanent, and needs a person."""
+        told = sink()
+
+        with self.assertRaises(HttpError):
+            self.labissues.sweep(fetch=fake(raises=HttpError(403, "forbidden", "", headers={})),
+                                 notifier=told)
+
+        self.assertEqual(len(told.sent), 1)
+        self.assertIn("permission", told.sent[0]["message"])
+
+    def test_a_transient_failure_pages_nobody(self):
+        """ADR-0001: GitHub being briefly unreachable is not a lab incident. A
+        timeout or a 5xx must not reach the red siren — it is exactly the alert
+        the ADR refused to accept when it kept GitHub out of `CONNECTORS`."""
+        told = sink()
+
+        for boom in (HttpError(502, "bad gateway", "", headers={}),
+                     ConnectionError("connection reset by peer")):
+            with self.assertRaises(Exception):
+                self.labissues.sweep(fetch=fake(raises=boom), notifier=told)
+
+        self.assertEqual(told.sent, [])
+
+    def test_each_stop_is_explained_as_itself(self):
+        """A renamed repository is not a rejected token. Sending somebody to
+        re-mint a working credential is worse than saying nothing."""
+        for status, phrase in ((401, "rejected"), (404, "renamed or deleted")):
+            self.labissues = importlib.reload(_labissues)   # re-arm the transition
+            told = sink()
+            with self.assertRaises(HttpError):
+                self.labissues.sweep(fetch=fake(raises=HttpError(status, "x", "", headers={})),
+                                     notifier=told)
+            self.assertIn(phrase, told.sent[0]["message"], f"{status} was misexplained")
+
     def test_a_recovered_sweep_re_arms_the_alert(self):
         """Rotate the token and it works again; if it is revoked a second time,
         that is a second transition and worth a second alert."""
@@ -1371,6 +1407,29 @@ class ReportSectionTest(IsolatedDataDirTest):
 
         self.assertEqual(out["failed_runs"], 1)
         self.assertEqual(out["by_verdict"], {})
+
+    def test_a_labelled_issue_with_no_record_is_counted_not_dropped(self):
+        """After a `data/` wipe every verdict is on GitHub and none is here. A
+        silent skip would report a queue of three as `by_verdict: {}` with
+        `untriaged: 0` — "all triaged, nothing found" — which is the same lie as
+        rendering an unreadable queue as an empty one."""
+        marked = [self.labissues.TRIAGED_LABEL]
+
+        out = self.section((1, marked, None), (2, marked, None), (3, marked, None),
+                           records={})
+
+        self.assertEqual(out["triaged_verdict_unknown"], 3)
+        self.assertEqual(out["by_verdict"], {})
+        self.assertEqual(out["untriaged"], 0, "they are triaged — just not by this install")
+
+    def test_an_unreadable_timestamp_does_not_fabricate_a_stalled_backlog(self):
+        """`untriaged_too_long` is the one signal the prompt reads as "triage has
+        probably stopped". Measuring an unparseable date from 1970 would invent
+        that finding out of one bad field."""
+        out = self.section((1, [], None, "not a date"), (2, [], None, ""))
+
+        self.assertEqual(out["untriaged_too_long"], [])
+        self.assertEqual(out["untriaged"], 2, "…but they are still counted as untriaged")
 
     def test_an_unreadable_queue_is_reported_as_unknown_not_as_empty(self):
         """Same rule as the page: a sweep that cannot read the repo does not
