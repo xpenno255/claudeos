@@ -26,7 +26,26 @@ PATH = os.path.join(DATA_DIR, "reports.json")
 KEEP = 12
 TICK = 300  # scheduler check interval, seconds
 
-DEFAULT_CONFIG = {"enabled": False, "day": 0, "hour": 8, "last_run": 0}  # Monday 08:00
+# How hard a failed weekly slot is retried before it is abandoned until the next
+# one. The numbers matter less than the fact that they are finite: a scheduled
+# report that failed used to be re-attempted every TICK for the rest of the week
+# — up to 2,016 times — and the expensive failure mode is also the deterministic
+# one, so every one of those attempts was billed (#27).
+#
+# Three tries half an hour apart recovers a rate limit or a network blip, which
+# is the whole point of retrying at all, and costs at most ~3 calls if the
+# failure is permanent.
+MAX_ATTEMPTS = 3
+RETRY_AFTER = 1800
+
+DEFAULT_CONFIG = {
+    "enabled": False, "day": 0, "hour": 8,   # Monday 08:00
+    "last_run": 0,          # last time a scheduled report SUCCEEDED
+    "last_attempt": 0,      # last time one was tried, successful or not
+    "attempts": 0,          # tries against `attempt_slot`
+    "attempt_slot": 0,      # the weekly slot `attempts` is counting
+    "last_error": None,     # {"message", "ts", "attempt"} — surfaced in the UI
+}
 
 _lock = threading.Lock()
 _running = threading.Event()  # one report generation at a time
@@ -37,7 +56,10 @@ def _load() -> dict:
         return {"config": dict(DEFAULT_CONFIG), "reports": []}
     with open(PATH, "r", encoding="utf-8") as f:
         d = json.load(f)
-    d.setdefault("config", dict(DEFAULT_CONFIG))
+    # Merged, not defaulted: a config written before the retry bookkeeping
+    # existed is missing those keys, and every reader would otherwise have to
+    # carry its own fallback for each one.
+    d["config"] = {**DEFAULT_CONFIG, **(d.get("config") or {})}
     d.setdefault("reports", [])
     return d
 
@@ -69,7 +91,12 @@ def set_config(cfg: dict) -> dict:
     out["day"], out["hour"] = day, hour
     with _lock:
         d = _load()
-        out["last_run"] = d["config"].get("last_run", 0)
+        # Carry the bookkeeping forward. `out` is built fresh from the caller's
+        # payload, so anything not copied here is destroyed by saving the
+        # schedule — and dropping `last_run` would make the current slot due
+        # again, which is the retry storm this module was just fixed for.
+        for k in ("last_run", "last_attempt", "attempts", "attempt_slot", "last_error"):
+            out[k] = d["config"].get(k, DEFAULT_CONFIG[k])
         d["config"] = out
         _save(d)
     return out
@@ -203,22 +230,42 @@ def collect() -> dict:
 
 # --------------------------------------------------------------- generate
 
-def generate(trigger: str = "manual") -> dict:
-    """Collect, ask Claude for the digest, store it and push a summary."""
+def generate(trigger: str = "manual", *, snapshot=None, analyse=None, now=None) -> dict:
+    """Collect, ask Claude for the digest, store it and push a summary.
+
+    `snapshot()`, `analyse(data)` and `now` are the seam: the default snapshot
+    sweeps every connector over the network and the default analysis is a paid
+    Opus call, so the failure paths — the expensive half of this module — are
+    tested with neither.
+
+    A scheduled run **counts its attempt before it spends anything**. Everything
+    else here is ordinary; that one ordering is the fix for #27.
+    """
     if _running.is_set():
         raise ValueError("a report is already being generated — wait for it to finish")
+    clock = time.time() if now is None else now
     _running.set()
     try:
-        data = collect()
-        report = ai.analyze_health(data)
+        attempt = _count_attempt(clock) if trigger == "scheduled" else 0
+        try:
+            data = (snapshot or collect)()
+            report = (analyse or ai.analyze_health)(data)
+        except Exception as e:  # noqa: BLE001 — recorded, then re-raised for the caller
+            if trigger == "scheduled":
+                _record_failure(e, attempt, clock)
+            raise
         report["id"] = secrets.token_hex(4)
-        report["ts"] = time.time()
+        report["ts"] = clock
         report["trigger"] = trigger
         with _lock:
             d = _load()
             d["reports"] = ([report] + d["reports"])[:KEEP]
             if trigger == "scheduled":
-                d["config"]["last_run"] = time.time()
+                # The slot is settled: clear the attempt state so a later failure
+                # on the NEXT slot starts from a clean count, and drop the stale
+                # error so the UI stops reporting a problem that is over.
+                d["config"].update(last_run=clock, attempts=0, attempt_slot=0,
+                                   last_error=None)
             _save(d)
 
         grade = report.get("grade", "?")
@@ -239,16 +286,85 @@ def generate(trigger: str = "manual") -> dict:
 
 # -------------------------------------------------------------- scheduler
 
-def _due(cfg: dict, now: float) -> bool:
-    if not cfg.get("enabled"):
-        return False
+def _slot(cfg: dict, now: float) -> float:
+    """The most recent weekly slot at or before `now`, as an epoch timestamp.
+
+    Shared by the due predicate and the attempt counter so the two can never
+    disagree about which week's report they are talking about.
+    """
     dt = datetime.datetime.fromtimestamp(now)
     days_back = (dt.weekday() - cfg.get("day", 0)) % 7
     slot = (dt - datetime.timedelta(days=days_back)).replace(
         hour=cfg.get("hour", 8), minute=0, second=0, microsecond=0)
     if slot.timestamp() > now:  # report day, but the hour hasn't come yet
         slot -= datetime.timedelta(days=7)
-    return cfg.get("last_run", 0) < slot.timestamp() <= now
+    return slot.timestamp()
+
+
+def _count_attempt(now: float) -> int:
+    """Charge this attempt to the current slot. Returns the attempt number.
+
+    **Written before the work, not after.** The bug this replaces wrote its
+    bookkeeping only on the success path, so a failure left the slot looking
+    untouched and the scheduler re-attempted it every TICK for the rest of the
+    week. Recording first means a crash, a kill, or a raised exception all leave
+    the same trace: this slot has been tried.
+
+    The counter is stamped with the slot it belongs to rather than being reset on
+    a schedule boundary — so it needs nothing to run at the right moment to
+    expire, and a new slot starts from zero simply by not matching.
+    """
+    with _lock:
+        d = _load()
+        cfg = d["config"]
+        slot = _slot(cfg, now)
+        if cfg.get("attempt_slot") != slot:
+            cfg["attempts"], cfg["attempt_slot"] = 0, slot
+        cfg["attempts"] = int(cfg.get("attempts") or 0) + 1
+        cfg["last_attempt"] = now
+        _save(d)
+        return cfg["attempts"]
+
+
+def _record_failure(e: Exception, attempt: int, now: float) -> None:
+    """Keep the failure where a human can find it, and say when we gave up.
+
+    The ops log alone is not enough here: a report that never generates cannot
+    carry its own failure into the weekly digest, which is where warnings are
+    normally read. So it also lands in the config, which `get_state()` returns
+    and the Reports panel renders.
+    """
+    message = f"{type(e).__name__}: {e}"
+    with _lock:
+        d = _load()
+        d["config"]["last_error"] = {"message": message, "ts": now, "attempt": attempt}
+        _save(d)
+    if attempt >= MAX_ATTEMPTS:
+        oplog.add("error", "reports",
+                  f"scheduled report failed {attempt}x — giving up until the next "
+                  f"weekly slot: {message}")
+
+
+def _due(cfg: dict, now: float) -> bool:
+    """Is this week's scheduled report outstanding, and worth another try?
+
+    Three ways to be not-due beyond "not that time yet": it already succeeded,
+    it has used up its attempts for this slot, or the last attempt was too
+    recent. Only the first of those existed before, which is why one failure
+    used to mean an unbounded, billed retry loop.
+    """
+    if not cfg.get("enabled"):
+        return False
+    slot = _slot(cfg, now)
+    if slot > now or cfg.get("last_run", 0) >= slot:
+        return False
+
+    tried = int(cfg.get("attempts") or 0) if cfg.get("attempt_slot") == slot else 0
+    if tried >= MAX_ATTEMPTS:
+        return False
+    if tried and now - (cfg.get("last_attempt") or 0) < RETRY_AFTER:
+        return False
+    return True
 
 
 def start() -> None:

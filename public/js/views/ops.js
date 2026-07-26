@@ -2,7 +2,7 @@
 // Tabs: NETWORK (UniFi) / COMPUTE (Proxmox) / CONTAINERS (Docker) / HOME (HA) / NAS (Synology)
 
 import { api } from "../api.js";
-import { el, fmtBytes, fmtPct, fmtUptime, debounce } from "../util.js";
+import { el, fmtBytes, fmtPct, fmtUptime, debounce, clockTime, timeAgo } from "../util.js";
 import { meter, sparkRow, sparkline } from "../charts.js";
 import { SYSTEMS, BY_ID } from "../meta.js";
 
@@ -1393,6 +1393,28 @@ function monitorForm(toast) {
 
 const DAY_NAMES = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"];
 
+// A scheduled report that keeps failing cannot carry its own failure into the
+// weekly digest — the digest is the thing that isn't happening. So it is said
+// here, on the panel that promises the report, rather than only in the ops log.
+function scheduleFailure(cfg) {
+  const err = cfg.last_error;
+  if (!err) return null;
+  const gaveUp = (err.attempt || 0) >= 3;   // reports.MAX_ATTEMPTS
+  // Bordered rather than bare: `.setup-result` is styled for a one-line result
+  // under a form control, and four stacked lines of it read as loose text
+  // instead of the one thing on this panel that needs attention.
+  return el("div", { class: "setup-result err",
+                     style: "border-left:2px solid var(--critical);padding:8px 0 8px 10px;"
+                          + "margin:0 0 14px" },
+    el("div", {}, `✕ The last scheduled report failed (attempt ${err.attempt || "?"}).`,
+      gaveUp ? " No further attempts will be made until the next weekly slot." : ""),
+    el("div", { class: "mono-dim", style: "margin-top:6px" },
+      err.ts ? `${clockTime(err.ts)} · ${timeAgo(err.ts)}` : ""),
+    el("div", { class: "mono-dim", style: "margin-top:6px" }, err.message || ""),
+    el("div", { class: "mono-dim", style: "margin-top:6px" },
+      "Run one by hand to retry now — a successful report clears this."));
+}
+
 async function reports(body, toast) {
   const state = await api.reports();
   const cfg = state.config || {};
@@ -1437,6 +1459,7 @@ async function reports(body, toast) {
 
   const schedPanel = el("div", { class: "panel accent" },
     el("div", { class: "panel-title" }, "AI HEALTH REPORT — POWERED BY CLAUDE"),
+    scheduleFailure(cfg),
     el("div", { class: "mono-dim", style: "margin-bottom:10px" },
       "A weekly snapshot of the whole lab — gateway health, security events, Proxmox, Docker, HA/ZHA, ",
       "uptime monitors, warnings — digested by Claude into a graded report with ranked findings. ",

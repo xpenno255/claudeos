@@ -20,6 +20,11 @@ expensive*. Two modules clear it.
   credentials.
 - `app/store.py` — one invariant only: saving never silently loses a secret
   (#39 destroyed a real credential during an unrelated edit and said nothing).
+- `app/reports.py` — the weekly schedule only. A failed scheduled report used to
+  re-attempt every five minutes for the rest of the week, and the failure that
+  loops is the one that gets billed (#27, ~$870 worst case). `generate()` takes
+  its snapshot, its analysis call and its clock as arguments so the expensive
+  paths are tested with none of them.
 
 Everything else has no tests and this is **not** a request to backfill them; add
 a seam only where a module earns one, and say in the test file why it did.
