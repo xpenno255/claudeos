@@ -108,15 +108,22 @@ class OffhoursTest(unittest.TestCase):
                 self.assertLessEqual(st["grace_min"], offhours.DEFAULT_GRACE_MIN)
 
 
-class _DeadConnector:
-    """A system that never answers, which is the only case this feature is about."""
-    @staticmethod
-    def summary(settings):
-        raise ConnectionError("no route to host")
+class _Connector:
+    """A system whose reachability the test drives directly."""
+    alive = False
+
+    @classmethod
+    def summary(cls, settings):
+        if not cls.alive:
+            raise ConnectionError("no route to host")
+        return {"cpu_pct": 5}
 
     @staticmethod
     def metrics(summary):
         return {}
+
+
+_DeadConnector = _Connector  # the case this feature is about
 
 
 class PollerTest(unittest.TestCase):
@@ -124,6 +131,7 @@ class PollerTest(unittest.TestCase):
     def setUp(self):
         poller._latest.clear()
         poller._history.clear()
+        _Connector.alive = False
         self.sent = []
         self.logged = []
         self.patches = [
@@ -142,7 +150,8 @@ class PollerTest(unittest.TestCase):
         for p in self.patches:
             p.stop()
 
-    def poll_at(self, state):
+    def poll_at(self, state, alive=False):
+        _Connector.alive = alive
         with mock.patch.object(poller.offhours, "status", lambda s, now=None: state):
             poller.poll_once()
         return poller._latest["synology"]
@@ -184,6 +193,35 @@ class PollerTest(unittest.TestCase):
         self.poll_at(self.EXPIRED)
         self.poll_at(self.EXPIRED)
         self.assertEqual(len(self.sent), 1, "one alert per transition, not per poll")
+
+    # ------------------------------------------- on when it needn't be is fine
+
+    def test_reachable_inside_the_window_is_simply_healthy(self):
+        """The window says a system *may* be off, never that it must be. Powering
+        the NAS on mid-window to use it is a normal thing to do and must not be
+        remarked on — no alert, and no "recovered" either, because it did not
+        come back from anything."""
+        self.poll_at(self.ASLEEP)
+        st = self.poll_at(self.ASLEEP, alive=True)
+        self.assertTrue(st["ok"])
+        self.assertFalse(st.get("scheduled_off"))
+        self.assertEqual(self.sent, [], "a manual power-on is not an event")
+
+    def test_powering_off_again_inside_the_window_is_silent(self):
+        self.poll_at(self.ASLEEP, alive=True)
+        st = self.poll_at(self.ASLEEP)
+        self.assertIsNone(st["ok"])
+        self.assertTrue(st["scheduled_off"])
+        self.assertEqual(self.sent, [], "back to asleep, still inside the window")
+
+    def test_a_fault_during_the_on_period_alerts_normally(self):
+        """The other half of the owner's rule: off when it is supposed to be on
+        is a possible fault, and the window must not have dulled that."""
+        self.poll_at(self.EXPIRED, alive=True)
+        st = self.poll_at(self.EXPIRED)
+        self.assertFalse(st["ok"])
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.sent[0][2].get("priority"), "high")
 
     def test_with_no_window_the_ordinary_down_path_is_unchanged(self):
         st = self.poll_at(None)
