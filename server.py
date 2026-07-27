@@ -294,7 +294,8 @@ def route_backup_create(_m, _p, body):
 def route_backup_update(_m, p, body):
     job = backups.update_job(p["jid"], body or {})
     oplog.add("info", "backups", f"backup job updated: {job['name']}")
-    return {"ok": True, "job": job}
+    # scrubbed: a mute toggle has no business handing back a bearer credential
+    return {"ok": True, "job": backups.without_token(job)}
 
 
 def route_backup_delete(_m, p, _b):
@@ -335,7 +336,7 @@ def route_backup_ping(_m, p, body):
         raise LookupError("not found")
     b = body or {}
     run = backups.record_run(
-        job["id"], ok=b.get("ok", True) is not False,
+        job["id"], ok=backups.reported_ok(b),
         size_bytes=b.get("bytes"), duration_s=b.get("duration_s"),
         detail=b.get("detail"))
     return {"ok": True, "recorded": run["ts"]}
@@ -513,8 +514,9 @@ ROUTES = [
     ("GET",    r"^/api/backups$",                                         route_backups),
     ("POST",   r"^/api/backups$",                                         route_backup_create),
     ("POST",   r"^/api/backups/sweep$",                                   route_backup_sweep),
-    # the ping route is matched before the generic job routes so a token can
-    # never be mistaken for a job id
+    # A 32-hex ping token and a 16-hex job id cannot collide on length, so the
+    # patterns are unambiguous whatever the order; listed ping-first anyway so
+    # the reason stays obvious to whoever adds the next route.
     ("POST",   r"^/api/backups/(?P<token>[0-9a-f]{32})/ping$",            route_backup_ping),
     ("POST",   r"^/api/backups/(?P<jid>[0-9a-f]{16})/token$",             route_backup_token),
     ("POST",   r"^/api/backups/(?P<jid>[0-9a-f]{16})$",                   route_backup_update),

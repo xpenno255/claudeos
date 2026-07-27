@@ -41,7 +41,9 @@ expensive*. Seven modules clear it.
   midnight and an off-by-one there just moves the silence, looking like nothing.
 
 - `app/backups.py` — status evaluation with the clock injected, persistence across
-  a restart, and anomaly baselines on thin history (#50). Every other surface
+  a restart, anomaly baselines on thin history, and four more that review turned
+  up: shell-shaped failure payloads, token exposure, discovery outage vs absence,
+  and the alert latch under two concurrent sweepers (#50). Every other surface
   measures reachability, which announces itself; a backup fails by *not
   happening*, so a job wrongly showing `ok` reports safety that does not exist.
   Not hypothetical: probing the cluster before the build found 25 consecutive

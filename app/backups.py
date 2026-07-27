@@ -192,6 +192,17 @@ def regenerate_token(job_id: str) -> dict:
         return job
 
 
+def without_token(job: dict) -> dict:
+    """A job safe to put in a response body.
+
+    The token is a bearer credential — anyone holding one can report a backup
+    healthy — so it crosses the wire only where the caller asked for it: on
+    creation and on regenerate. Echoing it back from an unrelated edit like a
+    mute toggle is the same carelessness #45 was about.
+    """
+    return {k: v for k, v in (job or {}).items() if k != "token"}
+
+
 def get_job(job_id: str) -> dict | None:
     with _lock:
         return _load()["jobs"].get(job_id)
@@ -213,6 +224,29 @@ def job_for_token(token: str) -> dict | None:
             if stored and secrets.compare_digest(str(stored), str(token)):
                 return job
     return None
+
+
+_FALSEY = {"false", "0", "no", "fail", "failed", "err", "error", ""}
+
+
+def reported_ok(body: dict) -> bool:
+    """Did the job say it succeeded?
+
+    Absent means yes: a bare `curl -X POST` is the documented minimum
+    integration and has no body at all.
+
+    Everything else is read generously, because the caller is a shell script.
+    `{"ok": 0}` and `{"ok": "false"}` are what `-d '{"ok":'"$rc"'}'` and an
+    unquoted variable actually produce, and a strict `is False` check would read
+    both as success — silently turning the one signal a failing job managed to
+    send into a green row.
+    """
+    if "ok" not in body:
+        return True
+    v = body["ok"]
+    if isinstance(v, str):
+        return v.strip().lower() not in _FALSEY
+    return bool(v)
 
 
 def _num(v, default):
@@ -294,6 +328,11 @@ def _status_for(job: dict, hist: list, now: float) -> dict:
     if job.get("kind") == "unprotected":
         return {"status": "unprotected", "last_ok": None, "baseline_ready": False}
 
+    # Whether a baseline exists is a fact about the history, not about today's
+    # outcome — reporting False on a failed job made the tab claim "baseline
+    # forming" for jobs with months of sizes behind them.
+    has_baseline = baseline([r for r in hist if r.get("ok")]) is not None
+
     if last is None:
         return {"status": "never", "last_ok": None, "baseline_ready": False}
 
@@ -301,10 +340,11 @@ def _status_for(job: dict, hist: list, now: float) -> dict:
     # how it went, so waiting out the grace period only delays the news.
     if not last.get("ok"):
         return {"status": "failed", "last_ok": last_ok and last_ok["ts"],
-                "detail": last.get("detail"), "baseline_ready": False}
+                "detail": last.get("detail"), "baseline_ready": has_baseline}
 
     if last_ok and (now - last_ok["ts"]) > grace_seconds(job):
-        return {"status": "stale", "last_ok": last_ok["ts"], "baseline_ready": False}
+        return {"status": "stale", "last_ok": last_ok["ts"],
+                "baseline_ready": has_baseline}
 
     # Succeeded and recent. The remaining question is whether what it produced
     # looks like what it usually produces.
@@ -364,15 +404,47 @@ def _bytes(n) -> str:
 
 # ------------------------------------------------------------------- alerts
 
+_NO_CHANGE = object()
+
+
+def _claim_transition(job_id: str, status: str):
+    """Claim the right to alert on `status`, atomically.
+
+    Returns the previous latch value if this call is the one that moved it, and
+    `_NO_CHANGE` otherwise — including for a muted job, whose latch is left
+    untouched so unmuting still announces whatever it is doing.
+
+    **Read, decide and write happen in one lock acquisition**, which is the
+    whole point. `sweep()` runs on the background sweeper *and* on demand from
+    `POST /api/backups/sweep`, so two threads can be in here at once; deciding
+    from a snapshot fetched under an earlier lock lets both read the same stale
+    latch and both fire, which is a duplicate page for one event.
+
+    `monitors._record` has the same shape for the same reason: commit the state
+    change under the lock, send the notification outside it.
+    """
+    with _lock:
+        d = _load()
+        job = d["jobs"].get(job_id)
+        if not job or job.get("muted"):
+            return _NO_CHANGE
+        prev = job.get("alerted")
+        if prev == status:
+            return _NO_CHANGE
+        job["alerted"] = status
+        _save(d)
+        return prev
+
+
 def _alert_on_transition(job: dict, status: str) -> None:
     """Alert on a change of state, never on the state itself.
 
-    A job that has been dead for a week must not notify every half hour; the
-    latch is the same shape `monitors._record` uses. Recovery is announced once,
-    from any alerting state, so a resolved alert does not need chasing.
+    A job that has been dead for a week must not notify every half hour.
+    Recovery is announced once, from any alerting state, so a resolved alert
+    does not need chasing.
     """
-    prev = job.get("alerted")
-    if status == prev:
+    prev = _claim_transition(job["id"], status)
+    if prev is _NO_CHANGE:
         return
     name = job.get("name") or job["id"]
     if status in _ALERT:
@@ -382,12 +454,6 @@ def _alert_on_transition(job: dict, status: str) -> None:
     elif prev in _ALERT and status == "ok":
         notify.send(f"Backup recovered: {name}", f"{name} is ok again.",
                     priority="default", tags=["white_check_mark"])
-    with _lock:
-        d = _load()
-        stored = d["jobs"].get(job["id"])
-        if stored:
-            stored["alerted"] = status
-            _save(d)
 
 
 # -------------------------------------------------------------------- sweep
@@ -566,10 +632,13 @@ def sweep() -> None:
         else:
             try:
                 discover_proxmox(settings, proxmox)
+                _discovery_error(clear=True)
             except Exception as e:  # noqa: BLE001 — discovery must not stop alerting
-                # Deliberately not silent: an unreachable Proxmox leaves the
-                # discovered jobs as they were, and a stale list that nobody
-                # knows is stale is the failure this module exists to prevent.
+                # Recorded, not just logged: an unreachable Proxmox leaves the
+                # discovered jobs as they were, and both the tab and the digest
+                # have to be able to say "we could not look" rather than showing
+                # an absence that reads as reassurance.
+                _discovery_error(e)
                 oplog.add("warn", "backups", f"proxmox backup discovery failed: {e}")
 
     for st in evaluate(list_jobs()):
@@ -578,12 +647,55 @@ def sweep() -> None:
             _alert_on_transition(job, st["status"])
 
 
+def _discovery_error(err=None, *, clear=False):
+    """Remember why discovery last failed, so the absence can be explained.
+
+    Story 26: an unreachable Proxmox must never look like "no backups found".
+    Without this the two states render identically on a fresh install — an empty
+    list — and an outage would read as a clean bill of health, which is the one
+    conclusion this module exists to prevent anybody drawing.
+    """
+    with _lock:
+        d = _load()
+        if clear:
+            if d.pop("discovery_error", None) is not None:
+                _save(d)
+            return None
+        if err is not None:
+            d["discovery_error"] = {"message": str(err)[:300], "ts": time.time()}
+            _save(d)
+        return d.get("discovery_error")
+
+
+def _size_trend(hist: list):
+    """How this job's size has moved over the last week, or None.
+
+    The digest asks whether a backup is quietly shrinking — the failure that a
+    per-run anomaly check misses because no single run is far enough out of band.
+    """
+    week_ago = time.time() - 7 * 86400
+    sized = [r for r in hist if r.get("ok") and r.get("size_bytes") is not None]
+    recent = [r["size_bytes"] for r in sized if r["ts"] >= week_ago]
+    older = [r["size_bytes"] for r in sized if r["ts"] < week_ago]
+    if not recent or not older:
+        return None
+    now_avg = sum(recent) / len(recent)
+    then_avg = sum(older) / len(older)
+    if not then_avg:
+        return None
+    pct = round(100.0 * (now_avg - then_avg) / then_avg, 1)
+    if abs(pct) < 10:
+        return None  # ordinary wobble; saying so every week is noise
+    return {"change_pct": pct, "from": _bytes(then_avg), "to": _bytes(now_avg)}
+
+
 def overview() -> dict:
     jobs = evaluate(list_jobs())
     counts = {}
     for s in jobs:
         counts[s["status"]] = counts.get(s["status"], 0) + 1
-    return {"jobs": jobs, "counts": counts, "statuses": list(STATUSES)}
+    return {"jobs": jobs, "counts": counts, "statuses": list(STATUSES),
+            "discovery_error": _discovery_error()}
 
 
 def report_section() -> dict:
@@ -602,12 +714,30 @@ def report_section() -> dict:
     counts = {}
     for s in jobs:
         counts[s["status"]] = counts.get(s["status"], 0) + 1
+
+    # Jobs whose size has moved materially over the week. Not the same question
+    # as `anomaly`, which judges one run against a baseline: a backup shrinking
+    # 15% a week never trips that and is exactly what a weekly digest is for.
+    trends = {}
+    for job in list_jobs():
+        t = _size_trend(runs(job["id"]))
+        if t:
+            trends[job.get("name") or job["id"]] = t
+
+    err = _discovery_error()
     return {
         "total": len(jobs),
         "by_status": counts,
         "needing_attention": attention,
-        "note": ("no backup jobs are configured or discovered — this is not a "
-                 "clean bill of health" if not jobs else None),
+        "size_trends": trends or None,
+        # An outage is not an absence. Without this the digest cannot tell
+        # "nothing is backed up" from "we could not look" (story 26).
+        "discovery_error": err,
+        "note": (
+            "backup discovery is failing, so this list may be incomplete — it is "
+            "NOT evidence that nothing needs backing up" if err else
+            "no backup jobs are configured or discovered — this is not a "
+            "clean bill of health" if not jobs else None),
     }
 
 
