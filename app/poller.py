@@ -14,7 +14,7 @@ import threading
 import time
 from collections import deque
 
-from . import notify, oplog, store, sweeper
+from . import notify, offhours, oplog, store, sweeper
 from .connectors import CONNECTORS
 
 POLL_INTERVAL = 30
@@ -41,7 +41,11 @@ def poll_once() -> None:
             with _lock:
                 _latest[system_id] = {"ok": None, "ts": time.time(), "error": "not configured"}
             continue
-        was_ok = _latest.get(system_id, {}).get("ok")
+        prev = _latest.get(system_id, {})
+        was_ok = prev.get("ok")
+        # distinguishes "never seen / not configured" from "asleep on schedule",
+        # which both carry ok=None but mean opposite things when it ends
+        was_scheduled = bool(prev.get("scheduled_off"))
         label = store.SYSTEM_LABELS.get(system_id, system_id)
         try:
             s = mod.summary(settings)
@@ -53,14 +57,36 @@ def poll_once() -> None:
                 notify.send(f"{label} recovered", "polling succeeded again",
                             priority="default", tags=["white_check_mark"])
         except Exception as e:  # noqa: BLE001 — any connector failure = offline
+            sched = offhours.status(settings)
+            if sched and sched["tolerated"]:
+                # Unreachable, but expected to be. Recorded as a third state
+                # rather than as ok=False: it is neither healthy nor broken, and
+                # calling it broken every night is how an alert gets ignored.
+                # `ok: None` also means the recovery branch above stays quiet
+                # when it wakes, which is likewise not news.
+                with _lock:
+                    _latest[system_id] = {"ok": None, "ts": time.time(),
+                                          "scheduled_off": True,
+                                          "error": offhours.reason(sched)}
+                # once per descent into the window, not once per 30s poll
+                if not was_scheduled:
+                    oplog.add("info", system_id, offhours.reason(sched))
+                continue
             with _lock:
                 _latest[system_id] = {"ok": False, "ts": time.time(), "error": str(e)}
             if was_ok is not False:
                 oplog.add("warn", system_id, f"poll failed: {e}")
             # only a True→False transition alerts, so a restart of ClaudeOS
-            # itself never re-fires "down" for systems already offline
-            if was_ok is True:
-                notify.send(f"{label} is DOWN", str(e),
+            # itself never re-fires "down" for systems already offline.
+            # `was_ok is None` covers the window closing on a system that never
+            # woke: the grace has run out, so this is a failure to wake and it
+            # alerts exactly like any other outage. Suppressing the noise must
+            # never suppress the fault.
+            if was_ok is True or (was_ok is None and was_scheduled):
+                detail = str(e)
+                if was_scheduled:
+                    detail = f"did not come back after its scheduled window — {e}"
+                notify.send(f"{label} is DOWN", detail,
                             priority="high", tags=["rotating_light"])
 
 

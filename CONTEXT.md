@@ -180,6 +180,33 @@ incident. Each stop is explained as itself (`labissues._stopped_because`), becau
 sending someone to re-mint a working token when the repo was renamed is worse than
 saying nothing.
 
+### Expected-offline window
+
+**Hours in which a system being unreachable is not a fault** (`app/offhours.py`,
+`offline_from` / `offline_to` / `offline_grace_min` on its Setup card). A NAS on a
+DSM power schedule is off every night on purpose; without a window the poller reads
+that as a `True→False` transition and pages at `high` — the same volume as a failing
+disk — every single night.
+
+**A system inside its window is `scheduled off`, which is a third state beside up and
+down** — `ok: None` with `scheduled_off: true`, a dim non-blinking tile, and no alert
+either way, since waking on time is not news either. The weekly digest is handed
+`scheduled_offline` instead of the connector's slice, so it neither calls the NAS
+broken nor infers it is healthy.
+
+**The window suppresses the alert; it must never suppress the fault.** The tolerated
+period is the window *plus* a grace for boot time, and one second past that an
+unreachable system is a **failure to wake** — a storage outage nobody is watching —
+which alerts at full `high` volume like any other. A feature that creates silence is
+defined by where the silence stops.
+
+Generic per-system, not Synology-specific: the poller reads a setting and knows
+nothing about whose it is, for the same reason `metrics()` and `report_slice()` live
+behind the connector seam.
+
+_Avoid_: "downtime", "maintenance window" — both suggest something is wrong or that
+work is happening. Nothing is wrong; the box is asleep on purpose.
+
 ### Nowhere to go
 
 **An alert raised while no notification channel is configured** — not a delivery

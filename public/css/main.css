@@ -205,6 +205,8 @@ a.rail-sys:hover .sys-name { color: var(--amber); }
 .led.err  { background: var(--critical); box-shadow: 0 0 9px var(--critical); animation: blink 1.2s infinite; }
 .led.off  { background: var(--ink-3); }
 .led.warn { background: var(--warning);  box-shadow: 0 0 9px var(--warning); }
+/* asleep on schedule: present but dim, and deliberately not blinking */
+.led.sleep { background: var(--cyan); opacity: .45; }
 
 .pill {
   display: inline-flex; align-items: center; gap: 6px;

@@ -12,7 +12,7 @@ python3 -m unittest discover -s tests
 
 Standard library only — no pytest, no dev dependency. Coverage is **deliberately
 narrow**, and the bar is one thing: failure modes that are *silent and
-expensive*. Four modules clear it.
+expensive*. Six modules clear it.
 
 - `app/labissues.py` (with `app/triagelog.py`) — takes its GitHub caller, its
   analysis run and its tracker writes as arguments, so re-triage loops and
@@ -29,6 +29,16 @@ expensive*. Four modules clear it.
   alert the app raised was discarded and *nothing recorded that it happened*
   (#41), so a failing disk's `urgent` warning spent its whole window in silence.
   The gap is recorded before any sender is reached, so this needs no network.
+- `app/httpclient.py` — URL scrubbing only. Telegram carries its bot token in
+  the URL path, so every error built from that URL leaked it to the browser, to
+  `data/opslog.jsonl` and — via `recent_warnings` — to the Anthropic API (#45).
+  `urlopen` is substituted, so this needs no network.
+- `app/offhours.py` (with the poller branch that reads it) — the boundary only.
+  The feature exists to create silence, so what is tested is where the silence
+  stops: a NAS still unreachable once its window and grace have passed has not
+  gone to sleep, it has failed to wake, and must alert like any other outage.
+  The window arithmetic is tested beside it because an overnight window crosses
+  midnight and an off-by-one there just moves the silence, looking like nothing.
 
 Everything else has no tests and this is **not** a request to backfill them; add
 a seam only where a module earns one, and say in the test file why it did.
