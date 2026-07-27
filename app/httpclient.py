@@ -6,11 +6,37 @@ hangs the poller or an API call.
 """
 
 import json
+import re
 import ssl
 import urllib.error
 import urllib.request
 
 DEFAULT_TIMEOUT = 6
+
+# A secret that rides in the URL instead of a header ends up in every error
+# message built from that URL — and those messages go three places that all
+# outlive the request: the browser, `data/opslog.jsonl` on disk, and the weekly
+# AI report, which ships warn/error lines to the Anthropic API as
+# `recent_warnings`. A failed Telegram delivery used to put the bot token in all
+# three.
+#
+# Scrubbed here because this module is the single place that formats a URL into
+# an exception, so no caller can forget to. `synology._redact` predates this and
+# stays: DSM's `account`/`_sid` parameters are its own, and it is already right.
+_URL_SECRETS = (
+    # Telegram carries the bot token as a path segment: /bot<id>:<secret>/method
+    (re.compile(r"/bot\d+:[A-Za-z0-9_-]+"), "/bot•••"),
+    # credential-bearing query parameters, whatever the service calls them
+    (re.compile(r"(?i)\b(pass|passwd|password|token|api_?key|apikey|secret|"
+                r"access_token|auth|sig|signature)=[^&\s]*"), r"\1=•••"),
+)
+
+
+def safe_url(url: str) -> str:
+    """A URL with any embedded credential replaced, for logs and error text."""
+    for pattern, replacement in _URL_SECRETS:
+        url = pattern.sub(replacement, url)
+    return url
 
 
 class HttpError(Exception):
@@ -61,11 +87,12 @@ def request(
             return parsed
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        raise HttpError(e.code, f"HTTP {e.code} from {url}", body, headers=e.headers) from e
+        raise HttpError(e.code, f"HTTP {e.code} from {safe_url(url)}", body,
+                        headers=e.headers) from e
     except urllib.error.URLError as e:
-        raise ConnectionError(f"cannot reach {url}: {e.reason}") from e
+        raise ConnectionError(f"cannot reach {safe_url(url)}: {e.reason}") from e
     except TimeoutError as e:
-        raise ConnectionError(f"timeout reaching {url}") from e
+        raise ConnectionError(f"timeout reaching {safe_url(url)}") from e
 
 
 def _parse(body: str):
