@@ -1,4 +1,4 @@
-"""Three invariants of backup tracking: status, persistence, and baselines.
+"""What backup tracking must never get wrong, because nothing would say so.
 
 `CLAUDE.md` sets the bar at failure modes that are **silent and expensive**, and
 this module is made of them. Every other surface in the app measures
@@ -11,8 +11,15 @@ That is not hypothetical here. Probing the live cluster before this was built
 found **25 consecutive nightly vzdump failures**, back three weeks, with nothing
 anywhere recording it.
 
-The three seams are the ones `docs/spec-backups.md` nominated, and each is here
-for a reason the spec argues:
+`docs/spec-backups.md` nominated three seams, and those are the first three
+classes below. Four more were added during review, each because it is its own
+silent-and-expensive surface rather than because the module now deserves broad
+coverage — a shell-shaped `{"ok": 0}` being read as success, a bearer token
+leaking into a response body (#45's mistake), an unreachable Proxmox rendering
+as "no backups found" (story 26), and one event paging twice because two
+sweepers raced the alert latch. The bar has not moved; these all clear it.
+
+The nominated three:
 
 1. **Status evaluation with the clock injected.** The entire feature is a
    comparison against wall-clock time. `evaluate(jobs, now)` takes `now` as an
@@ -29,6 +36,7 @@ Nothing here touches the network or the clock.
 """
 
 import importlib
+import json
 import os
 import shutil
 import sys
@@ -286,9 +294,121 @@ class _FakeProxmox:
         return [{"vmid": 100, "name": "HAOS"}, {"vmid": 101, "name": "docker"}]
 
 
+class ReportedOkTest(BackupsTestCase):
+    """Whether the job said it failed, read from a payload a shell wrote.
+
+    `-d '{"ok":'"$rc"'}'` emits `0`, and an unquoted variable emits the bare
+    string "false". A strict `is False` check called both a success — turning
+    the one signal a failing backup managed to send into a green row, which is
+    the exact lie this module exists to prevent.
+    """
+
+    def test_an_absent_key_is_success(self):
+        """A bare `curl -X POST` is the documented minimum integration."""
+        self.assertTrue(self.b.reported_ok({}))
+
+    def test_json_false_is_failure(self):
+        self.assertFalse(self.b.reported_ok({"ok": False}))
+
+    def test_shell_shaped_falsehoods_are_failures(self):
+        for v in (0, "0", "false", "False", " FALSE ", "no", "failed", "error", ""):
+            with self.subTest(value=v):
+                self.assertFalse(self.b.reported_ok({"ok": v}),
+                                 f"{v!r} must not record a success")
+
+    def test_ordinary_truths_are_successes(self):
+        for v in (True, 1, "true", "ok", "yes"):
+            with self.subTest(value=v):
+                self.assertTrue(self.b.reported_ok({"ok": v}))
+
+
+class TokenExposureTest(BackupsTestCase):
+    """The token is a bearer credential: holding one is enough to report a
+    backup healthy. #45 was the same carelessness with a Telegram token."""
+
+    def test_the_job_list_never_carries_tokens(self):
+        self.daily()
+        self.assertNotIn("token", json.dumps(self.b.overview()),
+                         "the list is polled by every open tab")
+
+    def test_without_token_strips_it_but_keeps_the_job(self):
+        job = self.daily()
+        safe = self.b.without_token(job)
+        self.assertNotIn("token", safe)
+        self.assertEqual(safe["name"], job["name"])
+
+
+class DiscoveryErrorTest(BackupsTestCase):
+    """Story 26: an unreachable Proxmox must look different from "no backups
+    found". The two states otherwise render identically — an empty list — and
+    an outage would read as a clean bill of health."""
+
+    def test_a_failed_discovery_is_recorded_and_explained(self):
+        self.b._discovery_error(ConnectionError("cannot reach proxmox"))
+        section = self.b.report_section()
+        self.assertIsNotNone(section["discovery_error"])
+        self.assertIn("NOT evidence", section["note"])
+        self.assertIsNotNone(self.b.overview()["discovery_error"])
+
+    def test_an_empty_list_with_no_error_says_so_differently(self):
+        section = self.b.report_section()
+        self.assertIsNone(section["discovery_error"])
+        self.assertIn("not a clean bill of health", section["note"])
+
+    def test_a_recovered_discovery_clears_the_error(self):
+        self.b._discovery_error(ConnectionError("boom"))
+        self.b._discovery_error(clear=True)
+        self.assertIsNone(self.b.overview()["discovery_error"])
+
+
+class AlertLatchTest(BackupsTestCase):
+    """One event, one page. `sweep()` runs on the background sweeper *and* on
+    demand from `POST /api/backups/sweep`, so the latch has to be claimed under
+    the same lock that reads it — otherwise both threads see the same stale
+    value and both notify."""
+
+    def test_a_transition_is_claimed_exactly_once(self):
+        job = self.daily()
+        first = self.b._claim_transition(job["id"], "failed")
+        second = self.b._claim_transition(job["id"], "failed")
+        self.assertIsNot(first, self.b._NO_CHANGE, "the first caller wins")
+        self.assertIs(second, self.b._NO_CHANGE, "the second must not also fire")
+
+    def test_concurrent_sweeps_produce_one_claim(self):
+        import threading
+        job = self.daily()
+        winners = []
+
+        def claim():
+            if self.b._claim_transition(job["id"], "stale") is not self.b._NO_CHANGE:
+                winners.append(1)
+
+        threads = [threading.Thread(target=claim) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(len(winners), 1, f"one event, one alert — got {len(winners)}")
+
+    def test_a_muted_job_leaves_its_latch_alone(self):
+        """So that unmuting still announces whatever the job is doing, rather
+        than silently inheriting a latch set while nobody was listening."""
+        job = self.daily(muted=True)
+        self.assertIs(self.b._claim_transition(job["id"], "failed"), self.b._NO_CHANGE)
+        self.assertIsNone(self.b.get_job(job["id"])["alerted"])
+
+    def test_recovery_is_claimed_after_an_alerting_state(self):
+        job = self.daily()
+        self.b._claim_transition(job["id"], "failed")
+        prev = self.b._claim_transition(job["id"], "ok")
+        self.assertEqual(prev, "failed", "recovery needs to know what it recovered from")
+
+
 class DiscoveryTest(BackupsTestCase):
-    """The spec excludes Proxmox *parsing* from testing and that stands. These
-    two are not parsing — they are safety claims that fail silently."""
+    """The spec excludes Proxmox *parsing* from testing and that stands — none
+    of these assert on field shapes. Each is a safety claim that fails
+    silently: a duplicated run corrupts the baseline, a vanished job leaves a
+    ghost, and deleting the owner's own job would destroy real config."""
 
     def setUp(self):
         super().setUp()

@@ -30,6 +30,7 @@ export async function renderBackups(body, toast) {
   const data = await api.backups().catch(() => ({ jobs: [], counts: {} }));
   const jobs = data.jobs || [];
   const counts = data.counts || {};
+  const discoveryError = data.discovery_error;
   const bad = (counts.failed || 0) + (counts.stale || 0) + (counts.unprotected || 0);
 
   const form = jobForm(toast);
@@ -64,6 +65,16 @@ export async function renderBackups(body, toast) {
         "checked every 30 min · a backup's failure is an absence, so it is watched by outcome, not reachability"),
       el("div", { class: "spacer" }),
       sweepBtn, addBtn),
+    // Story 26: "we could not look" must never render as "nothing to look at".
+    discoveryError
+      ? el("div", { class: "panel banner-alert", style: "margin-bottom:14px" },
+          el("div", { class: "glyph" }, "⚠"),
+          el("div", { class: "banner-body" },
+            el("h3", {}, "BACKUP DISCOVERY IS FAILING"),
+            el("p", {}, `Proxmox could not be read (${discoveryError.message}). `
+              + "Any list below may be incomplete — this is not evidence that "
+              + "nothing needs backing up.")))
+      : null,
     form,
     jobs.length
       ? el("div", { class: "panel" },
@@ -79,9 +90,11 @@ export async function renderBackups(body, toast) {
       // reassurance — the same rule the lab issues queue follows.
       : el("div", { class: "panel hero-empty" },
           el("div", { class: "glyph" }, "⚠"),
-          el("h2", {}, "NO BACKUPS TRACKED"),
+          el("h2", {}, discoveryError ? "BACKUP STATE UNKNOWN" : "NO BACKUPS TRACKED"),
           el("p", {},
-            "This is not a clean bill of health — it means nothing is being watched. ",
+            discoveryError
+              ? "Discovery is failing, so this is not 'nothing to back up' — it is 'we could not look'. "
+              : "This is not a clean bill of health — it means nothing is being watched. ",
             "Add a heartbeat job and paste one line into an existing backup script, ",
             "or link Proxmox on the Setup page to discover vzdump schedules automatically.")));
 }
@@ -111,7 +124,7 @@ function row(j, toast) {
         const { job } = await api.backupToken(j.id);
         const url = `${location.origin}/api/backups/${job.token}/ping`;
         const cell = tr.querySelector(".token-out");
-        cell.replaceChildren(el("pre", { class: "ping-snippet" }, `curl -fsS -X POST ${url}`));
+        cell.replaceChildren(snippet(`curl -fsS -X POST ${url}`, toast));
       } catch (e) { toast(String(e.message || e), "err", "FAILED"); }
     });
     actions.append(tokBtn);
@@ -158,6 +171,23 @@ function row(j, toast) {
   return tr;
 }
 
+function snippet(text, toast) {
+  const pre = el("pre", { class: "ping-snippet" }, text);
+  const copy = el("button", { class: "btn btn-ghost" }, "COPY");
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      copy.textContent = "COPIED";
+      setTimeout(() => { copy.textContent = "COPY"; }, 1500);
+    } catch {
+      // clipboard needs a secure context; the pre is user-select:all anyway
+      toast("select the line and copy it manually", "err", "CLIPBOARD BLOCKED");
+    }
+  });
+  return el("div", {}, pre, copy);
+}
+
+
 function jobForm(toast) {
   const name = el("input", { placeholder: "nightly postgres dump" });
   const hours = el("input", { placeholder: "24", type: "number", min: "1" });
@@ -178,7 +208,7 @@ function jobForm(toast) {
       const url = `${location.origin}/api/backups/${job.token}/ping`;
       out.replaceChildren(
         el("div", { class: "strong" }, "Add this to the end of your backup script:"),
-        el("pre", { class: "ping-snippet" }, `curl -fsS -X POST ${url}`),
+        snippet(`curl -fsS -X POST ${url}`, toast),
         el("div", {}, "…or report size and outcome:"),
         el("pre", { class: "ping-snippet" },
           `curl -fsS -X POST -H 'Content-Type: application/json' \\\n`
