@@ -180,6 +180,38 @@ incident. Each stop is explained as itself (`labissues._stopped_because`), becau
 sending someone to re-mint a working token when the repo was renamed is worse than
 saying nothing.
 
+### Backup job
+
+**A scheduled process that should produce a recoverable copy of something, observed
+by its *outcome* rather than its reachability** (`app/backups.py`). Distinct from a
+**monitor**, which asks whether a service is responding now. A backup job has a
+cadence, a last-success time and optionally a size history; it is never "up", only
+recently-successful or not.
+
+**Every other surface in this app measures reachability, which announces itself. A
+backup fails by not happening** — nothing errors, nothing stops answering, and the gap
+is invisible until the day you need what is missing. That is why polling cannot see it
+and why this is a separate module rather than a sixth uptime-monitor type.
+
+Two kinds, one shape: **heartbeat** (created by the owner, holds a token, pinged by the
+job itself) and **proxmox** (discovered from `/cluster/backup` each sweep, mutable only
+by muting, and it disappears when it disappears from the cluster).
+
+Status is a closed set: `ok`, `stale`, `failed`, `anomaly`, `never`, `unprotected`,
+`muted`. **`never` is not `ok`** — a job configured and never wired up is the likeliest
+way this feature fails silently, so it gets its own state rather than an empty cell,
+the same rule this glossary already sets for untriaged versus `no_fault_found`.
+**`unprotected`** is a guest with no backup job at all, and exists because the
+alternative is a list that looks complete and is not. **`muted` hides the alert, never
+the fact**: the real status is still computed and shown beside it.
+
+**An empty Backups tab is not good news.** It means nothing is being watched, and both
+the tab and the weekly digest say so explicitly rather than rendering a reassuring
+blank.
+
+_Avoid_: "backup monitor". A **monitor** is the uptime kind and answers a different
+question; conflating them is what #47 proposed and ADR-0001's reasoning rejected.
+
 ### Expected-offline window
 
 **Hours in which a system being unreachable is not a fault** (`app/offhours.py`,

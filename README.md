@@ -183,6 +183,10 @@ POST /api/docker/containers/{id}/{start|stop|restart}
 GET  /api/ha/entities
 POST /api/ha/service          {"domain","service","entity_id","data"}
 GET  /api/synology/storage                             # volumes + disk SMART
+GET  /api/backups                                      # backup jobs + status + counts
+POST /api/backups                                      # add a heartbeat job
+POST /api/backups/{token}/ping                         # a backup job reports itself (unauthenticated; the token is the credential)
+POST /api/backups/sweep                                # rediscover Proxmox vzdump schedules now
 GET  /api/labissues                                    # lab issue queue + triage state + daily budget
 POST /api/labissues/{number}/triage                    # triage one issue now
 GET  /api/labissues/{number}/verdict                   # the whole verdict, for the detail card

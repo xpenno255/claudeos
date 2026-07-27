@@ -23,8 +23,8 @@ import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from app import (ai, chat, labissues, monitors, notify, oplog, poller, registry, reports,
-                 scanner, smart, store, triagelog)
+from app import (ai, backups, chat, labissues, monitors, notify, oplog, poller, registry,
+                 reports, scanner, smart, store, triagelog)
 from app.connectors import CONNECTORS, docker, homeassistant, proxmox, synology, unifi
 from app.httpclient import HttpError
 
@@ -281,6 +281,66 @@ def route_scan(_m, _p, body):
     return result
 
 
+def route_backups(_m, _p, _b):
+    return backups.overview()
+
+
+def route_backup_create(_m, _p, body):
+    job = backups.add_job(body or {})
+    oplog.add("info", "backups", f"backup job added: {job['name']}")
+    return {"ok": True, "job": job}
+
+
+def route_backup_update(_m, p, body):
+    job = backups.update_job(p["jid"], body or {})
+    oplog.add("info", "backups", f"backup job updated: {job['name']}")
+    return {"ok": True, "job": job}
+
+
+def route_backup_delete(_m, p, _b):
+    job = backups.get_job(p["jid"])
+    backups.delete_job(p["jid"])
+    oplog.add("info", "backups", f"backup job removed: {(job or {}).get('name')}")
+    return {"ok": True}
+
+
+def route_backup_token(_m, p, _b):
+    job = backups.regenerate_token(p["jid"])
+    oplog.add("action", "backups", f"backup token regenerated: {job['name']}")
+    return {"ok": True, "job": job}
+
+
+def route_backup_sweep(_m, _p, _b):
+    backups.sweep()
+    return {"ok": True, **backups.overview()}
+
+
+def route_backup_ping(_m, p, body):
+    """Heartbeat ingest. Unauthenticated by design — a cron job has no session,
+    so the token in the path is the only credential.
+
+    POST rather than GET deliberately: a GET that mutates state gets fetched by
+    link previewers, crawlers and anything that unfurls a URL, and every one of
+    those would hold a dead job green. `-X POST` is a trivial cost at the call
+    site for removing a whole class of false reassurance.
+
+    The token is a bearer credential in a URL path, which is the shape that
+    caused #45. It is safe here only because `Handler.log_message` is a no-op —
+    see the note there before restoring request logging.
+    """
+    job = backups.job_for_token(p["token"])
+    if not job:
+        # Deliberately identical to any other unknown route: a distinct error
+        # would let someone probe for valid tokens.
+        raise LookupError("not found")
+    b = body or {}
+    run = backups.record_run(
+        job["id"], ok=b.get("ok", True) is not False,
+        size_bytes=b.get("bytes"), duration_s=b.get("duration_s"),
+        detail=b.get("detail"))
+    return {"ok": True, "recorded": run["ts"]}
+
+
 def route_monitors_list(_m, _p, _b):
     return {"monitors": monitors.list_monitors()}
 
@@ -450,6 +510,15 @@ ROUTES = [
     ("GET",    r"^/api/reports$",                                         route_reports_get),
     ("POST",   r"^/api/reports/run$",                                     route_reports_run),
     ("POST",   r"^/api/reports/config$",                                  route_reports_config),
+    ("GET",    r"^/api/backups$",                                         route_backups),
+    ("POST",   r"^/api/backups$",                                         route_backup_create),
+    ("POST",   r"^/api/backups/sweep$",                                   route_backup_sweep),
+    # the ping route is matched before the generic job routes so a token can
+    # never be mistaken for a job id
+    ("POST",   r"^/api/backups/(?P<token>[0-9a-f]{32})/ping$",            route_backup_ping),
+    ("POST",   r"^/api/backups/(?P<jid>[0-9a-f]{16})/token$",             route_backup_token),
+    ("POST",   r"^/api/backups/(?P<jid>[0-9a-f]{16})$",                   route_backup_update),
+    ("DELETE", r"^/api/backups/(?P<jid>[0-9a-f]{16})$",                   route_backup_delete),
     ("GET",    r"^/api/monitors$",                                        route_monitors_list),
     ("GET",    r"^/api/monitors/history$",                                route_monitors_history),
     ("POST",   r"^/api/monitors$",                                        route_monitor_create),
@@ -478,8 +547,20 @@ ROUTES = [
 class Handler(BaseHTTPRequestHandler):
     server_version = "ClaudeOS/1.0"
 
-    def log_message(self, fmt, *args):  # quiet the default per-request noise
-        pass
+    def log_message(self, fmt, *args):
+        """Silence the default per-request line.
+
+        **This is load-bearing, not just tidiness.** The default handler writes
+        the request path to stderr, and `POST /api/backups/<token>/ping` carries
+        a bearer credential in that path — anyone holding one can report a
+        backup healthy. Logging it would put the token in `docker logs`, which
+        is the same class of leak as #45 (a Telegram token in an error message
+        reaching the ops log and the weekly AI report).
+
+        If per-request logging is ever wanted for debugging, scrub the path
+        first — `httpclient.safe_url` already exists for exactly this and knows
+        the shape of a credential in a URL.
+        """
 
     # -------------------------------------------------------- responses
     def _send_json(self, obj, status=200):
@@ -648,6 +729,7 @@ def main():
     reports.start()
     smart.start()
     registry.start()
+    backups.start()
     labissues.start()
     chat.start()   # invalidates any pending write-approval left by a restart
     oplog.add("info", "claudeos", f"server started on {args.host}:{args.port}")
