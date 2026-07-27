@@ -318,7 +318,8 @@ def route_backup_sweep(_m, _p, _b):
 
 def route_backup_ping(_m, p, body):
     """Heartbeat ingest. Unauthenticated by design — a cron job has no session,
-    so the token in the path is the only credential.
+    so the token in the path is the only credential. Ratified in ADR-0002, which
+    records what a token permits and the two alternatives that were declined.
 
     POST rather than GET deliberately: a GET that mutates state gets fetched by
     link previewers, crawlers and anything that unfurls a URL, and every one of
