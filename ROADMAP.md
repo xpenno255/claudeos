@@ -54,8 +54,14 @@ caveats noted at the bottom.
   GHCR PATs on Setup → Container Registries (rate limits, private repos).
   6-hourly sweeps, UPDATE pills on the Containers tab, notify on new
   updates, feeds the weekly AI report.
-- **Proxmox backup monitoring** — vzdump task success/failure feed +
-  `/cluster/backup-info/not-backed-up` (VMs with no backup job).
+- ✅ **Proxmox backup monitoring** *(shipped 2026-07-27, #50)* — became the
+  wider **Backups tab**: `app/backups.py` tracks backup *outcomes* rather than
+  reachability, with heartbeat jobs (a `curl` line in any script) alongside
+  discovered Proxmox schedules. Live probing corrected two assumptions in this
+  entry: vzdump tasks are job-level, not per-VM (`id` is always `""`), so
+  `/cluster/backup` — not the task feed — is the source of job identity;
+  `/cluster/backup-info/not-backed-up` does work and needed no fallback.
+  The first sweep found 25 consecutive nightly failures nobody knew about.
 - **HA push updates** — persistent WebSocket `subscribe_events`
   (`state_changed`) using existing hws.py → real-time dashboard, alerts on
   device_offline/automation failure. Replaces polling.
@@ -64,10 +70,10 @@ caveats noted at the bottom.
   ML validates the pattern; expect warm-up period, no seasonality).
 - **AI alert triage + NL alert rules** — one-click root-cause hypothesis on
   any alert; "describe an alert in English" → rule. (Netdata pattern.)
-- **Agentic ops chat (flagship)** — chat panel where Claude gets read-only
-  tool access to all connectors (UniFi/Proxmox/Docker/HA), answers
-  "why is X slow?" with evidence; write actions confirm-gated. Architecture
-  proven by HolmesGPT (CNCF Sandbox, first-class Anthropic support).
+- ✅ **Agentic ops chat (flagship)** *(shipped 2026-07-25, `5de0438`)* — Ops
+  Chat: `app/chat.py` over the shared `app/toolloop.py`, read-only tool access
+  across the connectors, writes confirm-gated. The same loop was later reused
+  for lab-issue triage, which is what made #50-era triage cheap to build.
 
 ## Caveats / open questions from the research
 
