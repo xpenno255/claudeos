@@ -13,7 +13,9 @@ connector rather than becoming one, sweeps on its own cadence, keeps its own
 store, and contributes to the weekly digest through `reports.py`.
 
 **This store holds secrets.** `data/backups.json` contains heartbeat tokens,
-which are bearer credentials: anyone holding one can report a job healthy.
+which are bearer credentials: anyone holding one can report a job healthy — see
+ADR-0002 for why the ingest route is unauthenticated and what that does and does
+not permit.
 `monitors.py`'s header promises its store holds none, and that promise is not
 inherited here — said plainly because the two modules otherwise look alike.
 
