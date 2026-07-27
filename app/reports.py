@@ -24,7 +24,8 @@ import secrets
 import threading
 import time
 
-from . import ai, labissues, monitors, notify, oplog, poller, registry, smart, store
+from . import (ai, labissues, monitors, notify, offhours, oplog, poller, registry,
+               smart, store)
 from .connectors import CONNECTORS
 from .connectors._report import soft
 from .store import DATA_DIR
@@ -142,8 +143,18 @@ def collect() -> dict:
     # connector curates its slice, and a new one appears here without this
     # module being touched.
     for sid, mod in CONNECTORS.items():
-        if (s := _sys(sid)):
-            data["systems"][sid] = mod.report_slice(s)
+        if not (s := _sys(sid)):
+            continue
+        # A system inside its expected-offline window is reported as asleep, not
+        # attempted. Calling it would produce a block of {"error": ...} that the
+        # prompt is explicitly told to read as a finding, so the digest would
+        # report a NAS on a power schedule as broken every week.
+        sched = offhours.status(s)
+        if sched and sched["tolerated"]:
+            data["systems"][sid] = {"scheduled_offline": offhours.reason(sched),
+                                    "note": "expected to be powered down — not a fault"}
+            continue
+        data["systems"][sid] = mod.report_slice(s)
 
     # Two exceptions, attached rather than pushed behind the seam. Both are
     # reported inside a connector's block because that is where a reader looks

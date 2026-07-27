@@ -329,6 +329,10 @@ Rules:
 - Sections that show {"error": ...} mean that system could not be reached during
   collection — that is itself a finding. For `lab_issues` specifically, an error means
   the queue is unknown, NOT that there are no open issues.
+- A section showing `scheduled_offline` is a system deliberately powered down on a
+  schedule at collection time. That is **not** a fault, is not an outage, and must not
+  be reported as a finding or counted against the grade. Its data is simply unknown for
+  this run — say nothing about its health rather than inferring it is healthy.
 - Highlights are for genuinely good news; don't invent any.
 - Grade honestly: A = everything healthy, C = several things need attention,
   F = something important is broken right now."""

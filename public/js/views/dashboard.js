@@ -71,7 +71,11 @@ function alertingGap(gap) {
 }
 
 function statusLed(st) {
-  const cls = st?.ok === true ? "ok" : st?.ok === false ? "err" : "off";
+  // scheduled_off is its own state: neither healthy nor broken. It must not
+  // blink red — a tile that cries wolf every night stops being read.
+  const cls = st?.scheduled_off ? "sleep"
+    : st?.ok === true ? "ok"
+      : st?.ok === false ? "err" : "off";
   return el("span", { class: `led ${cls}` });
 }
 
@@ -114,15 +118,20 @@ function tiles(overview, history) {
     }
 
     const configured = cfg?.configured;
+    const asleep = !!st?.scheduled_off;
+    if (asleep) { big = "—"; unit = "asleep"; }
     const tile = el("div", {
       class: `panel tile ${configured ? "" : "tile-unconfigured"}`,
       onclick: () => { location.hash = configured ? `#/ops/${sys.tab}` : "#/setup"; },
     },
       el("div", { class: "tile-head" }, statusLed(st), el("span", { class: "tile-name" }, sys.label),
-        el("span", { class: "mono-dim" }, configured ? "" : "NOT LINKED")),
+        el("span", { class: "mono-dim" },
+          configured ? (asleep ? "SCHEDULED OFF" : "") : "NOT LINKED")),
       el("div", { class: "tile-big" }, configured ? big : "···", " ",
         el("small", {}, configured ? unit : "configure in setup")),
-      el("div", { class: "tile-sub" }, st?.ok === false ? `⚠ ${truncate(st.error, 60)}` : sub),
+      el("div", { class: "tile-sub" },
+        asleep ? truncate(st.error, 60)
+          : st?.ok === false ? `⚠ ${truncate(st.error, 60)}` : sub),
       el("div", { class: "tile-spark" }, sparkline(sparkPts, { color: sys.hex })));
     if (st?.ok === false) tile.querySelector(".tile-sub").style.color = "var(--critical)";
     wrap.append(tile);
