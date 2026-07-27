@@ -222,6 +222,64 @@ def guest_action(settings: dict, node: str, gtype: str, vmid: str, action: str) 
     return {"ok": True, "detail": f"{action} task {data.get('data', '')} started for {gtype}/{vmid}"}
 
 
+def backup_jobs(settings: dict) -> list:
+    """Configured vzdump schedules from `/cluster/backup`.
+
+    Verified live 2026-07-27. This — not the task list — is the source of job
+    identity: it carries a stable `id`, the `schedule`, which guests are covered
+    (`vmid`, or `all`), and the destination `storage`. The spec assumed vzdump
+    *tasks* would give per-guest detail; they do not (see `vzdump_tasks`).
+    """
+    return _call(settings, "GET", "/cluster/backup").get("data", [])
+
+
+def vzdump_tasks(settings: dict, node: str, limit: int = 50) -> list:
+    """Recent vzdump runs on one node, newest first.
+
+    Verified live 2026-07-27, and the shape is *not* what the spec expected:
+    every task carries `id: ""`, because a scheduled vzdump is one job-level run
+    covering all its guests rather than one task per guest. Per-guest outcomes
+    exist only inside the task log, which would mean parsing free text.
+
+    Consequence for the caller: a task can be attributed to a node, not to a
+    specific job. With one schedule per node — this lab's case — that is exact.
+    With two it is a guess, and `backups` says so rather than pretending.
+
+    `status` is the string `"OK"` on success, otherwise the failure text.
+    """
+    tasks = _call(settings, "GET",
+                  f"/nodes/{node}/tasks?typefilter=vzdump&limit={int(limit)}"
+                  ).get("data", [])
+    out = []
+    for t in tasks:
+        status = t.get("status")
+        if status is None:
+            continue  # still running; it has not produced an outcome yet
+        start, end = t.get("starttime"), t.get("endtime")
+        out.append({
+            "node": t.get("node") or node,
+            "upid": t.get("upid"),
+            "started": start,
+            "ended": end,
+            "duration_s": (end - start) if (start and end) else None,
+            "ok": status == "OK",
+            "status": status,
+        })
+    return out
+
+
+def unprotected_guests(settings: dict) -> list:
+    """Guests with no backup job covering them, from `/cluster/backup-info`.
+
+    Verified live 2026-07-27 (returned `[]` on a cluster where both guests are
+    covered, which is the correct answer rather than an empty stub). Raises like
+    any other call if the endpoint is absent, and `backups` falls back to
+    differencing `guests()` against the configured `vmid` lists.
+    """
+    return _call(settings, "GET",
+                 "/cluster/backup-info/not-backed-up").get("data", [])
+
+
 def disk_list(settings: dict, node: str) -> list:
     """Physical disks on a node (health/wearout come from PVE's smartctl)."""
     return _call(settings, "GET", f"/nodes/{node}/disks/list").get("data", [])

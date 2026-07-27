@@ -60,6 +60,13 @@ export const api = {
   reportRun:       ()            => call("POST",   "/api/reports/run"),
   reportConfig:    (c)           => call("POST",   "/api/reports/config", c),
 
+  backups:         ()            => call("GET",    "/api/backups"),
+  backupCreate:    (j)           => call("POST",   "/api/backups", j),
+  backupUpdate:    (id, j)       => call("POST",   `/api/backups/${id}`, j),
+  backupDelete:    (id)          => call("DELETE", `/api/backups/${id}`),
+  backupToken:     (id)          => call("POST",   `/api/backups/${id}/token`),
+  backupSweep:     ()            => call("POST",   "/api/backups/sweep"),
+
   monitors:        ()            => call("GET",    "/api/monitors"),
   monitorsHistory: ()            => call("GET",    "/api/monitors/history"),
   monitorCreate:   (m)           => call("POST",   "/api/monitors", m),

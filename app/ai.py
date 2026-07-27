@@ -329,6 +329,14 @@ Rules:
 - Sections that show {"error": ...} mean that system could not be reached during
   collection — that is itself a finding. For `lab_issues` specifically, an error means
   the queue is unknown, NOT that there are no open issues.
+- `backups` reports whether the lab's backups are actually happening, which no other
+  section can tell you — everything else measures reachability, and a backup fails by
+  simply not happening. `needing_attention` lists jobs that are `failed`, `stale`,
+  `unprotected`, `never` or `anomaly`; every one of those is worth a finding, and
+  `failed` or `stale` on a real backup outranks almost anything else in the report.
+  `never` means a job was configured and has never once reported — treat it as broken,
+  not as new. A `note` saying nothing is tracked is **not** good news: it means the lab
+  has no backup coverage this app can see, and that itself is the finding.
 - A section showing `scheduled_offline` is a system deliberately powered down on a
   schedule at collection time. That is **not** a fault, is not an outage, and must not
   be reported as a finding or counted against the grade. Its data is simply unknown for

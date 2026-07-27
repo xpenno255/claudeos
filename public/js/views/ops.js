@@ -5,6 +5,7 @@ import { api } from "../api.js";
 import { el, fmtBytes, fmtPct, fmtUptime, debounce, clockTime, timeAgo } from "../util.js";
 import { meter, sparkRow, sparkline } from "../charts.js";
 import { SYSTEMS, BY_ID } from "../meta.js";
+import { renderBackups } from "./backups.js";
 
 const TABS = [
   { tab: "network",    label: "NETWORK",    sys: "unifi" },
@@ -13,6 +14,7 @@ const TABS = [
   { tab: "home",       label: "HOME",       sys: "homeassistant" },
   { tab: "nas",        label: "NAS",        sys: "synology" },
   { tab: "uptime",     label: "UPTIME",     sys: null },  // service monitors — not tied to one system
+  { tab: "backups",    label: "BACKUPS",    sys: null },  // backup outcomes — not tied to one system
   { tab: "reports",    label: "REPORTS",    sys: null },  // scheduled AI health reports
 ];
 
@@ -42,7 +44,7 @@ export async function renderOps(root, args, { toast }) {
     return;
   }
 
-  const renderers = { network, compute, containers, home, nas, uptime, reports };
+  const renderers = { network, compute, containers, home, nas, uptime, backups: renderBackups, reports };
   await renderers[active](body, toast, overview);
 }
 

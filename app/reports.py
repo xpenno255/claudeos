@@ -24,8 +24,8 @@ import secrets
 import threading
 import time
 
-from . import (ai, labissues, monitors, notify, offhours, oplog, poller, registry,
-               smart, store)
+from . import (ai, backups, labissues, monitors, notify, offhours, oplog, poller,
+               registry, smart, store)
 from .connectors import CONNECTORS
 from .connectors._report import soft
 from .store import DATA_DIR
@@ -188,6 +188,11 @@ def collect() -> dict:
     # A top-level section, alongside the monitors and the warnings — not a
     # per-connector block, because lab issues are not a connector (ADR-0001).
     data["lab_issues"] = soft(labissues.report_section)
+
+    # Top-level, like the monitors and the lab issue queue: backups are not any
+    # one system's business. An empty section is explicitly *not* good news, and
+    # the section says so itself rather than trusting the model to infer it.
+    data["backups"] = soft(backups.report_section)
 
     data["metric_stats_last_hour"] = _metric_stats()
     return data

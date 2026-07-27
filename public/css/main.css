@@ -208,6 +208,14 @@ a.rail-sys:hover .sys-name { color: var(--amber); }
 /* asleep on schedule: present but dim, and deliberately not blinking */
 .led.sleep { background: var(--cyan); opacity: .45; }
 
+/* the copy-me curl line on the Backups tab */
+.ping-snippet {
+  font-family: var(--font-mono); font-size: 11.5px;
+  background: var(--page); border: 1px solid var(--hairline);
+  color: var(--cyan); padding: 9px 11px; margin: 6px 0 10px;
+  white-space: pre-wrap; word-break: break-all; user-select: all;
+}
+
 .pill {
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 10px; letter-spacing: .12em;

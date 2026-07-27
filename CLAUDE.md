@@ -12,7 +12,7 @@ python3 -m unittest discover -s tests
 
 Standard library only — no pytest, no dev dependency. Coverage is **deliberately
 narrow**, and the bar is one thing: failure modes that are *silent and
-expensive*. Six modules clear it.
+expensive*. Seven modules clear it.
 
 - `app/labissues.py` (with `app/triagelog.py`) — takes its GitHub caller, its
   analysis run and its tracker writes as arguments, so re-triage loops and
@@ -39,6 +39,14 @@ expensive*. Six modules clear it.
   gone to sleep, it has failed to wake, and must alert like any other outage.
   The window arithmetic is tested beside it because an overnight window crosses
   midnight and an off-by-one there just moves the silence, looking like nothing.
+
+- `app/backups.py` — status evaluation with the clock injected, persistence across
+  a restart, and anomaly baselines on thin history (#50). Every other surface
+  measures reachability, which announces itself; a backup fails by *not
+  happening*, so a job wrongly showing `ok` reports safety that does not exist.
+  Not hypothetical: probing the cluster before the build found 25 consecutive
+  nightly vzdump failures nobody knew about. `evaluate(jobs, now)` takes its
+  clock as an argument, so no test waits and none touches the network.
 
 Everything else has no tests and this is **not** a request to backfill them; add
 a seam only where a module earns one, and say in the test file why it did.
