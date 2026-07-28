@@ -34,8 +34,10 @@ the AI features — with automatic retries and typed errors. Plain
 Add an Anthropic API key (console.anthropic.com) on Setup → Claude AI to enable,
 on the Home tab:
 
-- **AI Log Analysis** — sends the HA error log to `claude-opus-4-8`, which
-  deduplicates, ranks and categorises issues and recommends concrete fixes.
+- **AI Log Analysis** — sends the HA error log to `claude-opus-5` (the analysis
+  model, named once in `app/ai.py` and reported by the API alongside every
+  result), which deduplicates, ranks and categorises issues and recommends
+  concrete fixes.
 - **AI Mesh Insights** — sends the ZHA device inventory (LQI/RSSI/availability)
   plus zigbee-related log lines to Claude for a graded mesh-health report with
   placement/repeater/battery recommendations.

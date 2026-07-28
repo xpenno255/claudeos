@@ -58,6 +58,18 @@ export async function renderChat(root, args, { toast }) {
   function renderHistory(list) {
     histBox.replaceChildren(
       el("div", { class: "panel-title" }, "CONVERSATIONS"),
+      // Read from the server's answer rather than written here (#62). Labelled
+      // "next run" because it sits above a list of past conversations and is the
+      // *currently configured* model: the transcripts below it may well have been
+      // produced by a different one, and this app does not record which. Letting
+      // it read as an attribution for those would be the same false claim #62
+      // removed, just relocated.
+      //
+      // Taken from the outer `meta` on purpose: the refresh at the bottom of this
+      // file re-renders the rail with a fresh conversation list only, and the
+      // model cannot change while the page is open.
+      el("div", { class: "mono-dim", style: "font-size:10px;margin:-4px 0 8px" },
+        `next run: ${meta.model || "model unknown"}`),
       el("button", { class: "btn btn-mini", style: "width:100%;margin-bottom:10px",
         onclick: () => { location.hash = "#/chat"; location.reload(); } }, "＋ NEW"),
       ...(list.length ? list.map(c => el("a", {

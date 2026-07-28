@@ -95,7 +95,13 @@ const FORMS = [
   {
     id: "ai",
     title: "CLAUDE AI — ANALYSIS ENGINE",
-    note: "Powers the AI log analysis and ZHA mesh insights on the Home page. Create an API key at console.anthropic.com → API Keys. Analyses run on claude-opus-4-8; logs are sent to the Anthropic API when you click an analyse button, never automatically.",
+    // The one sentence in this file that is a claim about where the owner's data
+    // goes, so the model in it is filled from the server rather than written here
+    // (#62). The prose is hand-written; only the name is substituted.
+    note: (models) => "Powers the AI log analysis and ZHA mesh insights on the Home page. "
+      + "Create an API key at console.anthropic.com → API Keys. Analyses run on "
+      + `${models?.analysis || "the configured analysis model"}; logs are sent to the `
+      + "Anthropic API when you click an analyse button, never automatically.",
     fields: [
       { key: "api_key", label: "ANTHROPIC API KEY", secret: true,
         hint: "sk-ant-… — stored encrypted like all other secrets" },
@@ -178,7 +184,7 @@ export async function renderSetup(root, _args, { toast }) {
   root.append(intro);
 
   const grid = el("div", { class: "setup-grid" });
-  for (const form of FORMS) grid.append(card(form, config[form.id], overview.systems?.[form.id], toast));
+  for (const form of FORMS) grid.append(card(form, config[form.id], overview.systems?.[form.id], toast, overview.models));
   root.append(grid);
 
   root.append(el("div", { class: "panel accent", style: "margin:16px 0" },
@@ -189,11 +195,11 @@ export async function renderSetup(root, _args, { toast }) {
       "Repeated identical alerts are muted for 5 minutes so a flapping box can't flood your phone.")));
 
   const ngrid = el("div", { class: "setup-grid" });
-  for (const form of NOTIFY_FORMS) ngrid.append(card(form, config[form.id], undefined, toast));
+  for (const form of NOTIFY_FORMS) ngrid.append(card(form, config[form.id], undefined, toast, overview.models));
   root.append(ngrid);
 }
 
-function card(form, cfg, status, toast) {
+function card(form, cfg, status, toast, models) {
   const meta = BY_ID[form.id];
   const configured = cfg?.configured;
   const settings = cfg?.settings || {};
@@ -346,7 +352,8 @@ function card(form, cfg, status, toast) {
     status?.ok === false && status.error
       ? el("div", { class: "setup-result err", style: "margin:0 0 8px" }, `last poll: ${status.error}`)
       : null,
-    el("div", { class: "setup-note" }, form.note),
+    el("div", { class: "setup-note" },
+      typeof form.note === "function" ? form.note(models) : form.note),
     ...fieldsEls,
     form.tls
       ? el("label", { class: "check" }, tlsCheck, "verify TLS certificate (off for self-signed)")

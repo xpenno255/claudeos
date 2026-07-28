@@ -358,8 +358,7 @@ function triageCard(r) {
       el("span", { class: "finding-title" }, r.summary || "")),
     el("div", { class: "finding-detail" }, r.explanation || ""),
     el("div", { class: "finding-fix" }, r.recommendation || ""),
-    r._usage ? el("div", { class: "mono-dim", style: "margin-top:4px;font-size:10px" },
-      `claude-opus-4-8 · ${r._usage.input_tokens} in / ${r._usage.output_tokens} out tokens`) : null);
+    usageFooter(r._usage, { style: "margin-top:4px;font-size:10px" }));
 }
 
 // ------------------------------------------------------------ COMPUTE
@@ -1109,8 +1108,8 @@ function renderAnalysis(r) {
   items.sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9));
   if (!items.length) parts.push(el("div", { class: "pill ok" }, "● NO ISSUES FOUND"));
   for (const f of items) parts.push(findingCard(f));
-  if (r._usage) parts.push(el("div", { class: "mono-dim", style: "margin-top:6px" },
-    `claude-opus-4-8 · ${r._usage.input_tokens ?? "?"} in / ${r._usage.output_tokens ?? "?"} out tokens`));
+  const footer = usageFooter(r._usage);
+  if (footer) parts.push(footer);
   return parts;
 }
 
@@ -1534,22 +1533,42 @@ function reportBody(r) {
   if (!items.length) parts.push(el("div", { class: "pill ok" }, "● NO ISSUES FOUND"));
   for (const f of items) parts.push(findingCard(f));
   // The report's own price, beside the report — a cost nobody sees is barely
-  // better than none (#60). A report with no `cost` predates the meter, so it
-  // says "not measured" rather than implying the call was free.
-  const c = r.cost;
-  if (r._usage || c) {
-    parts.push(el("div", { class: "mono-dim", style: "margin-top:6px" },
-      `${c?.model || "claude-opus-4-8"} · `
-      + `${r._usage?.input_tokens ?? c?.input ?? "?"} in / `
-      + `${r._usage?.output_tokens ?? c?.output ?? "?"} out tokens · `,
-      typeof c?.usd === "number"
-        ? el("span", { style: "color:var(--text)" }, `$${c.usd.toFixed(4)}`)
-        : "cost not measured"));
-  }
+  // better than none (#60).
+  const footer = usageFooter(r._usage, { cost: r.cost, metered: true });
+  if (footer) parts.push(footer);
   return parts;
 }
 
 // ------------------------------------------------------------ shared
+
+// What an analysis cost, in the model's own words. The three panels that show
+// this used to carry the model name as a literal, which was correct when written
+// and wrong the moment the constant moved (#62) — so the name comes from the
+// result now, and a result that never recorded one says so.
+//
+// "model unknown" rather than a guess on purpose: this footer's whole job is to
+// say which model produced the output above it, and an analysis stored before the
+// server started reporting it cannot answer. Substituting whatever is configured
+// today would make the footer confidently wrong about old output, which is the
+// exact failure this replaced.
+// `metered` is passed explicitly rather than inferred from `cost` being absent,
+// because those are different states and only reports have both: a null cost on a
+// metered surface means nobody measured it, which is not the same as free (#60),
+// while the log and mesh analyses have no cost concept at all. Inferring one from
+// the other would silently drop "cost not measured" from every pre-meter report.
+function usageFooter(usage, { cost = null, metered = false,
+                              style = "margin-top:6px" } = {}) {
+  if (!usage && !cost) return null;
+  const model = usage?.model || cost?.model || "model unknown";
+  const inTok = usage?.input_tokens ?? cost?.input ?? "?";
+  const outTok = usage?.output_tokens ?? cost?.output ?? "?";
+  const line = `${model} · ${inTok} in / ${outTok} out tokens`;
+  if (!metered) return el("div", { class: "mono-dim", style }, line);
+  return el("div", { class: "mono-dim", style }, `${line} · `,
+    typeof cost?.usd === "number"
+      ? el("span", { style: "color:var(--text)" }, `$${cost.usd.toFixed(4)}`)
+      : "cost not measured");
+}
 
 function filterRows(scope, q) {
   for (const r of scope.querySelectorAll("tr[data-k]")) {

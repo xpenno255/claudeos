@@ -54,10 +54,11 @@ RETRY_AFTER = 1800
 # most expensive call this app makes by roughly an order of magnitude (#60), so
 # the two rates stay separate constants rather than one shared one.
 #
-# claude-opus-4-8 list price, checked 2026-07-28: $5 / $25 per MTok. Opus 5 is
-# priced the same, so this survives `ai.MODEL` moving up a version within the
-# tier — but it is a number that has to be re-checked, not derived, so the model
-# it was checked against is recorded on every report alongside the figure.
+# claude-opus-5 list price, checked 2026-07-28: $5 / $25 per MTok — the same as
+# claude-opus-4-8, which this app called until #62, so the bump between them
+# needed no new figure. That is luck, not a rule: this is a number that has to be
+# re-checked rather than derived, which is why every report records the model it
+# was actually priced against instead of trusting this comment to stay true.
 OPUS_USD_PER_MTOK = (5.0, 25.0)
 
 DEFAULT_CONFIG = {
@@ -115,6 +116,12 @@ def price(usage) -> dict | None:
 
     Cache fields are not read because `ai.ask_json` does not report them: a
     report is one call with no prefix to reuse, so there is nothing to discount.
+
+    The model recorded is the one the *API said it used*, taken from the usage
+    block, falling back to the constant only if the response carried none. Naming
+    `ai.MODEL` here instead would relabel this report with whatever is configured
+    at the moment of pricing, which is a different claim and, across a version
+    bump, a false one (#62).
     """
     if not isinstance(usage, dict):
         return None
@@ -122,7 +129,7 @@ def price(usage) -> dict | None:
     if not isinstance(inp, int) or not isinstance(out, int):
         return None
     in_rate, out_rate = OPUS_USD_PER_MTOK
-    return {"input": inp, "output": out, "model": ai.MODEL,
+    return {"input": inp, "output": out, "model": usage.get("model") or ai.MODEL,
             "usd": round((inp * in_rate + out * out_rate) / 1_000_000, 6)}
 
 

@@ -66,6 +66,15 @@ expensive*. Eight modules clear it.
   nightly vzdump failures nobody knew about. `evaluate(jobs, now)` takes its
   clock as an argument, so no test waits and none touches the network.
 
+One test file is not a module's: `tests/test_model_naming.py` asserts that nothing
+under `public/` names a Claude model. The server reports which model produced a
+result and which one it will call next; a view that keeps its own copy renders it
+confidently forever with nothing able to contradict it, which is how one stale
+constant became a false claim on the Setup card about where the owner's logs go
+(#62). It guards the way that comes back — a plausible `|| "claude-…"` fallback
+added so a footer never looks empty — so it forbids the literal rather than
+requiring the field.
+
 Everything else has no tests and this is **not** a request to backfill them; add
 a seam only where a module earns one, and say in the test file why it did.
 
