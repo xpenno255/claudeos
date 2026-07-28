@@ -14,9 +14,9 @@ should require a fresh decision mid-build.
 [#11](https://github.com/xpenno255/claudeos/issues/11),
 [#13](https://github.com/xpenno255/claudeos/issues/13)). Primary sources live in
 `docs/research/agent-loop-api.md`, `docs/research/prior-art-agentic-ops.md` and
-`docs/research/stdlib-streaming.md`; the UI prototype that answered
-[#11](https://github.com/xpenno255/claudeos/issues/11) is on branch
-`prototype/chat-ui`.
+`docs/research/stdlib-streaming.md`. The UI prototype that answered
+[#11](https://github.com/xpenno255/claudeos/issues/11) was throwaway by design and
+has been deleted; its outcome is section 14 below.
 
 Numbers marked **(tunable)** are defaults chosen so the build never stalls, not
 decisions to relitigate. Everything else is fixed.
@@ -327,9 +327,10 @@ risk class, and they inherit the container's `/data` mount.
 ## 14. UI — MISSION LOG
 
 Chat is a **destination page**: a new top-level route (`#/chat`) alongside
-Dashboard / Operations / Setup, with a nav entry. Reference implementation of the
-layout: variant A on branch `prototype/chat-ui` (`public/js/views/protochat.js`,
-commit `85d64ee`) — **rewrite it properly**, do not promote prototype code.
+Dashboard / Operations / Setup, with a nav entry. The layout is variant A of a
+throwaway prototype, since rewritten properly into `public/js/views/chat.js` —
+that file is the implementation, and what follows is the record of what was
+chosen. The prototype and its branch are gone, as its own header instructed.
 
 - **Single wide column**, ~880px, centred. The transcript reads top-to-bottom like an
   investigation log.
