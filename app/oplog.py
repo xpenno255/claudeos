@@ -10,19 +10,32 @@ import threading
 import time
 from collections import deque
 
-from .store import DATA_DIR
-
-LOG_PATH = os.path.join(DATA_DIR, "opslog.jsonl")
+from . import store
 
 _lock = threading.Lock()
 _recent: deque = deque(maxlen=250)
 
 
+def _log_path() -> str:
+    """Resolved per call rather than bound at import.
+
+    `store.DATA_DIR` is rebound whenever the data directory is reconfigured,
+    which is how the tests keep their state out of the real one. A path computed
+    once at import survives that change and keeps pointing at the old directory
+    — so a test run appended imaginary failures to the owner's real ops log, and
+    `reports` fed them to the model through `recent_warnings` as fact (#66).
+    Reading `store.DATA_DIR` through the module, not as a copied value, is what
+    makes redirecting the directory sufficient.
+    """
+    return os.path.join(store.DATA_DIR, "opslog.jsonl")
+
+
 def _load_recent() -> None:
-    if not os.path.exists(LOG_PATH):
+    path = _log_path()
+    if not os.path.exists(path):
         return
     try:
-        with open(LOG_PATH, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             lines = f.readlines()[-250:]
         for line in lines:
             try:
@@ -41,8 +54,8 @@ def add(level: str, system: str, message: str) -> dict:
     with _lock:
         _recent.append(entry)
         try:
-            os.makedirs(DATA_DIR, exist_ok=True)
-            with open(LOG_PATH, "a", encoding="utf-8") as f:
+            os.makedirs(store.DATA_DIR, exist_ok=True)
+            with open(_log_path(), "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry) + "\n")
         except OSError:
             pass

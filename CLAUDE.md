@@ -7,8 +7,13 @@ environment. See `README.md` for architecture and the JSON API surface.
 ## Tests
 
 ```bash
-python3 -m unittest discover -s tests
+python3 -m unittest discover -s tests -t .
 ```
+
+`-t .` makes `tests` a package, so `tests/__init__.py` runs before any suite and
+redirects `CLAUDEOS_DATA` at a temp directory. The isolating suites also import
+it explicitly ahead of `app`, so the plain `-s tests` form works too — but the
+flag is what guarantees it rather than relying on import order (#66).
 
 Standard library only — no pytest, no dev dependency. Coverage is **deliberately
 narrow**, and the bar is one thing: failure modes that are *silent and
@@ -66,7 +71,18 @@ expensive*. Eight modules clear it.
   nightly vzdump failures nobody knew about. `evaluate(jobs, now)` takes its
   clock as an argument, so no test waits and none touches the network.
 
-One test file is not a module's: `tests/test_model_naming.py` asserts that nothing
+Two test files are not a module's. `tests/test_oplog_isolation.py` asserts only
+where the ops log writes, never what it records: the path used to be bound at
+import, so a suite that redirected `CLAUDEOS_DATA` moved its own store and left
+the log pointed at the real one. A test run appended 368 imaginary entries to
+`data/opslog.jsonl` — failed reports, a rejected token — and because `reports`
+builds `recent_warnings` from that file, the next weekly report would have ranked
+and explained failures that never happened (#66). The suite's own output becoming
+an input to a report the owner trusts is the expensive shape; the tests forbid it
+in both directions, one for a redirect being honoured and one for the run never
+reaching the real directory at all.
+
+`tests/test_model_naming.py` asserts that nothing
 under `public/` names a Claude model. The server reports which model produced a
 result and which one it will call next; a view that keeps its own copy renders it
 confidently forever with nothing able to contradict it, which is how one stale

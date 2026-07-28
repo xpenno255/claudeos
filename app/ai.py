@@ -376,6 +376,12 @@ Rules:
 
 
 def analyze_health(data: dict) -> dict:
+    # 10k is sized for the API's default reasoning effort, which is what this
+    # call runs at. Thinking and response share this budget, so raising effort
+    # without raising this truncates the report — and a truncated *scheduled*
+    # report raises, which retries three times before giving up (#27). Guidance
+    # for the top effort levels is 64k. See
+    # .out-of-scope/per-caller-reasoning-effort.md for why it is left alone.
     user = ("Weekly homelab snapshot:\n"
             f"```json\n{json.dumps(data, indent=1)[:120000]}\n```")
     return ask_json(REPORT_SYSTEM_PROMPT, user, REPORT_SCHEMA, max_tokens=10000)

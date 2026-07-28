@@ -21,6 +21,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# Imported before `app`: this sets CLAUDEOS_DATA, and `store` binds
+# DATA_DIR at import — after it, the redirect is too late (#66).
+from tests import restore_data_dir
+
 from app import store as _store  # noqa: E402
 
 
@@ -36,7 +40,7 @@ class SaveSystemTest(unittest.TestCase):
                                          "password": "s3cret"})
 
     def tearDown(self):
-        os.environ.pop("CLAUDEOS_DATA", None)
+        restore_data_dir()
         shutil.rmtree(self.tmp, ignore_errors=True)
         importlib.reload(_store)
 
