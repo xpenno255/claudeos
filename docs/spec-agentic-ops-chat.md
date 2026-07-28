@@ -12,9 +12,11 @@ should require a fresh decision mid-build.
 [#9](https://github.com/xpenno255/claudeos/issues/9),
 [#10](https://github.com/xpenno255/claudeos/issues/10),
 [#11](https://github.com/xpenno255/claudeos/issues/11),
-[#13](https://github.com/xpenno255/claudeos/issues/13)). Primary sources live on
-branches `research/agent-loop-api`, `research/prior-art-agentic-ops`,
-`research/stdlib-streaming`, and `prototype/chat-ui`.
+[#13](https://github.com/xpenno255/claudeos/issues/13)). Primary sources live in
+`docs/research/agent-loop-api.md`, `docs/research/prior-art-agentic-ops.md` and
+`docs/research/stdlib-streaming.md`; the UI prototype that answered
+[#11](https://github.com/xpenno255/claudeos/issues/11) is on branch
+`prototype/chat-ui`.
 
 Numbers marked **(tunable)** are defaults chosen so the build never stalls, not
 decisions to relitigate. Everything else is fixed.
