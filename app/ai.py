@@ -329,6 +329,15 @@ Rules:
 - Sections that show {"error": ...} mean that system could not be reached during
   collection — that is itself a finding. For `lab_issues` specifically, an error means
   the queue is unknown, NOT that there are no open issues.
+- `alerting` is whether anything in this report can reach the owner at all, and it is
+  authoritative — **never infer the state of alerting from the ops log.** A `"had
+  nowhere to go"` warning in `recent_warnings` describes the moment it was written,
+  not now. Read `alerting` instead: a non-empty `channels` list means alerts are
+  being delivered and needs no comment at all; an empty one means **every alert this
+  app raises is being discarded**, which is a finding in its own right and a serious
+  one, because it silently voids every other finding in this report. `paused` lists
+  channels deliberately switched off — mention them only if `channels` is empty.
+  `gap` is non-null when alerts have actually been lost, and names the most recent.
 - `backups` reports whether the lab's backups are actually happening, which no other
   section can tell you — everything else measures reachability, and a backup fails by
   simply not happening. `needing_attention` lists jobs that are `failed`, `stale`,
