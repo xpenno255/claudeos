@@ -22,15 +22,30 @@ labels. Here they are identical, so there is nothing to translate:
 | --- | --- | --- |
 | `bug` | `bug` | Something is broken |
 | `enhancement` | `enhancement` | New feature or improvement |
+| — | `verification` | Shipped work nobody has watched run unattended |
 | `needs-triage` | `needs-triage` | Not yet evaluated — waiting on the maintainer |
 | `needs-info` | `needs-info` | Waiting on the reporter for more information |
 | `ready-for-agent` | `ready-for-agent` | Triaged and specified — an agent can pick this up |
 | `ready-for-human` | `ready-for-human` | Triaged and specified — needs a human, not an agent |
 | `wontfix` | `wontfix` | Will not be actioned |
 
-A triaged issue carries **exactly one category** (`bug` / `enhancement`) and
-**exactly one state**. Conflicting state labels are a bug in the triage, not a
-valid combination — flag it rather than guessing which one is stale.
+A triaged issue carries **exactly one category** (`bug` / `enhancement` /
+`verification`) and **exactly one state**. Conflicting state labels are a bug in
+the triage, not a valid combination — flag it rather than guessing which one is
+stale.
+
+`verification` is this repo's third category and has no canonical role behind it,
+so `/triage` will not reach for it on its own. It exists because the same issue
+kept recurring and fitting neither of the other two: something has shipped and
+works when a person drives it, but nobody has seen it happen unattended (#40,
+#55). That is not a bug — nothing is known broken — and not an enhancement —
+nothing new is being built. Both earlier attempts were filed with no category at
+all and read as sloppy triage rather than the deliberate choice they were.
+
+Use it when the work exists and the open question is only whether reality agrees.
+It pairs with `ready-for-human` almost always: what makes these unfinishable by an
+agent is that they need a real scheduler, real elapsed time, or a judgement about
+model output.
 
 `wayfinder:*` labels are a separate axis and are not triage states. They mark a
 wayfinder map and its child tickets; see the wayfinding section below.
