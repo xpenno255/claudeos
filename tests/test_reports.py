@@ -245,5 +245,95 @@ class ScheduleTest(unittest.TestCase):
         self.assertEqual(self.config()["attempts"], 1)
 
 
+class MeterTest(unittest.TestCase):
+    """The meter, for one reason: **a wrong rate is invisible.**
+
+    A retry loop announces itself — the ops log fills up and the bill arrives.
+    Mispricing does not. The report is the single most expensive call this app
+    makes (one Opus call over a 120k-character snapshot), and it went unmetered
+    entirely until #60. The specific trap that ticket names is reusing
+    `toolloop._PRICES`, which is Sonnet: that constant is right there, one import
+    away, applies to the same `_usage` shape, and produces a number that looks
+    entirely plausible while being roughly an order of magnitude too low. Nothing
+    at runtime would ever contradict it.
+
+    So what is pinned here is the arithmetic and the *absence* of a number —
+    never the schedule, which the class above owns. `generate()`'s analysis seam
+    means none of it costs anything to run.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["CLAUDEOS_DATA"] = self.tmp
+        importlib.reload(_store)
+        self.reports = importlib.reload(_reports)
+
+    def tearDown(self):
+        os.environ.pop("CLAUDEOS_DATA", None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        importlib.reload(_store)
+
+    def generate(self, usage):
+        def _analyse(_data):
+            r = dict(REPORT)
+            if usage is not None:
+                r["_usage"] = usage
+            return r
+        return self.reports.generate("manual", snapshot=snapshot, analyse=_analyse,
+                                     now=1_784_220_000.0)
+
+    def test_a_report_is_priced_at_the_opus_rate_not_the_sonnet_one(self):
+        """The headline. 100k in / 10k out is $0.75 on Opus ($5/$25 per MTok) and
+        $0.40 on Sonnet's introductory rate — so the wrong constant does not fail,
+        it just quietly halves the number and keeps doing so forever."""
+        report = self.generate({"input_tokens": 100_000, "output_tokens": 10_000})
+
+        self.assertAlmostEqual(report["cost"]["usd"], 0.75, places=6)
+        self.assertEqual(report["cost"]["input"], 100_000)
+        self.assertEqual(report["cost"]["output"], 10_000)
+
+    def test_the_rate_is_not_the_sonnet_rate_by_accident(self):
+        """Guards the constant itself rather than a call through it: an edit that
+        points this at `toolloop._PRICES` passes every other test here."""
+        from app import toolloop
+
+        self.assertNotEqual(self.reports.OPUS_USD_PER_MTOK, toolloop._PRICES["intro"])
+        self.assertNotEqual(self.reports.OPUS_USD_PER_MTOK, toolloop._PRICES["list"])
+
+    def test_the_model_the_price_was_checked_against_is_recorded(self):
+        """A hand-checked rate outlives the model it was checked against, so the
+        report says which one it priced — otherwise a future tier change is
+        undetectable after the fact."""
+        report = self.generate({"input_tokens": 10, "output_tokens": 1})
+
+        self.assertEqual(report["cost"]["model"], _reports.ai.MODEL)
+
+    def test_an_unmeasured_report_costs_none_not_zero(self):
+        """Zero is a claim that the call was free. None is a claim that nobody
+        looked — which is true, and is the difference between a total that is
+        wrong and a total that says it is incomplete."""
+        report = self.generate(None)
+
+        self.assertIsNone(report["cost"])
+
+    def test_a_malformed_usage_block_does_not_become_a_price(self):
+        """`_usage` comes from whichever of `ai.py`'s two paths ran, and the raw
+        fallback reads its numbers out of a JSON body that can carry nulls."""
+        report = self.generate({"input_tokens": None, "output_tokens": 2594})
+
+        self.assertIsNone(report["cost"])
+
+    def test_the_total_says_how_much_of_it_is_unmeasured(self):
+        """A sum over partly-unpriced history is the failure mode this whole
+        module exists to avoid: it looks like an answer."""
+        self.generate({"input_tokens": 100_000, "output_tokens": 10_000})
+        self.generate(None)
+
+        spend = self.reports.get_state()["spend"]
+        self.assertAlmostEqual(spend["usd"], 0.75, places=6)
+        self.assertEqual(spend["reports"], 1, "the unpriced report must not be counted")
+        self.assertEqual(spend["unmetered"], 1, "…but it must be admitted to")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -46,6 +46,20 @@ TICK = 300  # scheduler check interval, seconds
 MAX_ATTEMPTS = 3
 RETRY_AFTER = 1800
 
+# What one report costs, per million tokens.
+#
+# Deliberately **not** `toolloop._PRICES`: that is Sonnet 5 ($3/$15 list,
+# introductory $2/$10 to 2026-08-31), and a report is a single Opus call over a
+# snapshot capped at 120k characters. Pricing it as Sonnet would under-report the
+# most expensive call this app makes by roughly an order of magnitude (#60), so
+# the two rates stay separate constants rather than one shared one.
+#
+# claude-opus-4-8 list price, checked 2026-07-28: $5 / $25 per MTok. Opus 5 is
+# priced the same, so this survives `ai.MODEL` moving up a version within the
+# tier — but it is a number that has to be re-checked, not derived, so the model
+# it was checked against is recorded on every report alongside the figure.
+OPUS_USD_PER_MTOK = (5.0, 25.0)
+
 DEFAULT_CONFIG = {
     "enabled": False, "day": 0, "hour": 8,   # Monday 08:00
     "last_run": 0,          # last time a scheduled report SUCCEEDED
@@ -84,7 +98,52 @@ def get_state() -> dict:
     with _lock:
         d = _load()
     d["running"] = _running.is_set()
+    d["spend"] = _spend(d["reports"])
     return d
+
+
+# ------------------------------------------------------------------ metering
+
+def price(usage) -> dict | None:
+    """Price one report from the usage `ai.ask_json` already attached.
+
+    Returns None when there is nothing to price — a report stored before this
+    existed, or an `analyse` that returned no usage. **None means "not
+    measured", and that distinction is the point**: a zero would claim the most
+    expensive call in the app was free, which is the shape of the blind spot
+    this closes rather than a fix for it.
+
+    Cache fields are not read because `ai.ask_json` does not report them: a
+    report is one call with no prefix to reuse, so there is nothing to discount.
+    """
+    if not isinstance(usage, dict):
+        return None
+    inp, out = usage.get("input_tokens"), usage.get("output_tokens")
+    if not isinstance(inp, int) or not isinstance(out, int):
+        return None
+    in_rate, out_rate = OPUS_USD_PER_MTOK
+    return {"input": inp, "output": out, "model": ai.MODEL,
+            "usd": round((inp * in_rate + out * out_rate) / 1_000_000, 6)}
+
+
+def _spend(reports: list) -> dict:
+    """What the reports still on file have cost.
+
+    Scoped to the kept reports, not to all time, and says so: `reports` counts
+    what went into the total and `unmetered` counts entries carrying no cost, so
+    a total assembled from half-measured history cannot read as complete.
+
+    This is a meter, not a budget. #60 left the budget question open on the
+    grounds that a weekly report is one predictable call while RUN REPORT NOW is
+    a button a human can press repeatedly — deciding that wants real numbers,
+    which is what this produces. Nothing here refuses to spend.
+    """
+    priced = [r["cost"] for r in reports
+              if isinstance(r.get("cost"), dict) and isinstance(r["cost"].get("usd"), (int, float))]
+    return {"usd": round(sum(c["usd"] for c in priced), 6),
+            "reports": len(priced),
+            "unmetered": len(reports) - len(priced),
+            "kept": KEEP}
 
 
 def set_config(cfg: dict) -> dict:
@@ -234,6 +293,7 @@ def generate(trigger: str = "manual", *, snapshot=None, analyse=None, now=None) 
         report["id"] = secrets.token_hex(4)
         report["ts"] = clock
         report["trigger"] = trigger
+        report["cost"] = price(report.get("_usage"))
         with _lock:
             d = _load()
             d["reports"] = ([report] + d["reports"])[:KEEP]
@@ -254,8 +314,14 @@ def generate(trigger: str = "manual", *, snapshot=None, analyse=None, now=None) 
             (report.get("summary", "") + (f" Top findings: {top}" if top else ""))[:900],
             priority="high" if worst else "default",
             tags=["clipboard"])
+        # The cost goes in the log line too, not only on the report: the ops log
+        # is where spend is looked for after the fact, and triage already answers
+        # "what did that run cost" there.
+        spent = (report["cost"] or {}).get("usd")
         oplog.add("action", "reports",
-                  f"health report generated ({trigger}): grade {grade}, {len(findings)} finding(s)")
+                  f"health report generated ({trigger}): grade {grade}, "
+                  f"{len(findings)} finding(s), "
+                  + (f"${spent:.4f}" if spent is not None else "cost not measured"))
         return report
     finally:
         _running.clear()

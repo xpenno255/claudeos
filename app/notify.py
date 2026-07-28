@@ -286,6 +286,53 @@ def alerting_gap() -> dict | None:
             "last_ts": d.get("last_ts"), "since": d.get("since")}
 
 
+def telegram_chat_ids() -> dict:
+    """Chats that have messaged the bot, read with the stored token.
+
+    Exists so nobody ever has to build a `getUpdates` URL by hand. The Setup
+    card used to tell them to, and both halves of that advice did damage (#54):
+    it put a live bot token in a browser URL bar — history, sync, and whatever
+    sits in between, the exact spread #45 was fixed for — and then *consumed the
+    message it was telling you to go and read*, because `getUpdates` without an
+    offset acknowledges the pending updates and they do not come back.
+
+    Two details that make this safe to press:
+
+    * `offset=-1` returns the most recent update **without** acknowledging the
+      rest, so a queue somebody has already drained still yields something and
+      pressing twice is not destructive.
+    * An empty result is the normal first state, not a fault, so it comes back
+      `ok` with no chats and the caller asks for a message rather than reporting
+      an error.
+
+    The token never leaves the server, which is the reason this is a route at all
+    rather than a better-worded hint.
+    """
+    s = store.get_system("telegram", reveal_secrets=True)
+    if not (s or {}).get("bot_token"):
+        raise LookupError("no Telegram bot token stored yet — paste the token from "
+                          "@BotFather and press SAVE first, then try again")
+    r = request("GET",
+                f"https://api.telegram.org/bot{s['bot_token']}/getUpdates?offset=-1",
+                verify_tls=True)
+    if not isinstance(r, dict) or not r.get("ok"):
+        detail = (r or {}).get("description") if isinstance(r, dict) else None
+        raise ConnectionError(f"Telegram rejected getUpdates: {detail or 'unexpected reply'}")
+
+    # Keyed by id so one chat that sent several messages is offered once.
+    chats = {}
+    for u in r.get("result") or []:
+        msg = (u.get("message") or u.get("edited_message")
+               or u.get("channel_post") or u.get("my_chat_member") or {})
+        chat = msg.get("chat") or {}
+        if (cid := chat.get("id")) is None:
+            continue
+        who = (" ".join(filter(None, (chat.get("first_name"), chat.get("last_name"))))
+               or chat.get("title") or chat.get("username") or chat.get("type") or "chat")
+        chats[str(cid)] = {"chat_id": str(cid), "label": who, "type": chat.get("type")}
+    return {"ok": True, "chats": list(chats.values())}
+
+
 def test_channel(cid: str) -> dict:
     """Send a real test notification through one channel (Setup page)."""
     if cid not in CHANNEL_IDS:

@@ -329,6 +329,15 @@ Rules:
 - Sections that show {"error": ...} mean that system could not be reached during
   collection — that is itself a finding. For `lab_issues` specifically, an error means
   the queue is unknown, NOT that there are no open issues.
+- In `recent_security_events`, a host is written as `name (ip)` and that is the whole
+  identity of one device — two events naming the same `name (ip)` are the same machine,
+  and you must not count it twice or describe it as "several internal hosts". A source
+  written as `name (ip unknown)` **could not be resolved to an address**: report it by
+  name alone and say the address is unknown. Never take an IP from a nearby event to
+  fill that gap — the other event is a different event, adjacency is not identity, and
+  a confidently wrong machine name sends someone to investigate the wrong host.
+  `event_identities` says whether resolution ran at all; if it shows an error, treat
+  every host in those events as unidentified.
 - `alerting` is whether anything in this report can reach the owner at all, and it is
   authoritative — **never infer the state of alerting from the ops log.** A `"had
   nowhere to go"` warning in `recent_warnings` describes the moment it was written,

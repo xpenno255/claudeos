@@ -24,6 +24,7 @@ export const api = {
   deleteSystem:    (id)          => call("DELETE", `/api/systems/${id}`),
   testSystem:      (id)          => call("POST",   `/api/systems/${id}/test`),
   pollNow:         ()            => call("POST",   "/api/poll"),
+  telegramChatIds: ()            => call("POST",   "/api/notify/telegram/chat-ids"),
 
   unifiDevices:    ()            => call("GET",    "/api/unifi/devices"),
   unifiClients:    ()            => call("GET",    "/api/unifi/clients"),

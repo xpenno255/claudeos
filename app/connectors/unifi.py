@@ -120,9 +120,23 @@ def report_slice(settings: dict) -> dict:
     Security events are capped at the ten most recent and quoted as messages
     only: the digest is prose about the week, and the full event objects are
     both large and already on the Ops page for anyone who wants them.
+
+    Those messages are handed over with **resolved identities**, not as UniFi
+    worded them. UniFi names a source by hostname when it has one and by bare IP
+    when it does not, sometimes for the same device in consecutive events, and
+    the snapshot carried no map between the two — so one NAS arrived as two
+    offending hosts and the report attributed it to a third machine entirely
+    (#59). Resolving here rather than in the prompt is the point: the join is the
+    step that failed.
     """
     ins = soft(insights, settings)
-    sec = soft(events, settings, ["SECURITY"], 0, 10)
+    # Failing soft, not hard: an unreachable client list must not cost the report
+    # its security events. An empty map degrades to "(ip unknown)", which is
+    # true, and `event_identities` below says the resolution never ran.
+    idents = soft(identities, settings)
+    failed = "error" in idents  # `soft`'s shape; no MAC or IP is ever "error"
+    resolved = {} if failed else idents
+    sec = soft(events, settings, ["SECURITY"], 0, 10, resolved)
     anoms = soft(anomalies, settings)
     return {
         "summary": soft(summary, settings),
@@ -131,6 +145,11 @@ def report_slice(settings: dict) -> dict:
         "firmware_updates": ins.get("updates"),
         "security_events_total": sec.get("total"),
         "recent_security_events": [e.get("message") for e in (sec.get("events") or [])[:8]],
+        # Whether the identities above can be trusted, stated rather than
+        # inferred — the same reason `reports.collect` states the alerting state
+        # instead of leaving it to be deduced (#53).
+        "event_identities": (idents if failed
+                             else f"resolved against {len(resolved)} known addresses"),
         "client_anomalies": anoms[:10] if isinstance(anoms, list) else anoms,
     }
 
@@ -222,25 +241,98 @@ def clients(settings: dict) -> list:
     return out
 
 
-def _render_msg(raw: str, params: dict) -> str:
+def identities(settings: dict) -> dict:
+    """MAC **and** IP → one canonical `name (ip)` per associated client.
+
+    Two keys pointing at the same string is the whole point. UniFi templates an
+    event's source either as `{SRC_CLIENT}`, whose `id` is the device's MAC, or
+    as `{SRC_IP}`, whose `id` is a bare address — and nothing in the event says
+    the two forms are the same machine. Keying on both means either phrasing
+    resolves to the same identity.
+
+    The join is on MAC, not on name: `{SRC_CLIENT}` carries a hostname with no
+    address at all, so a name is the one thing that cannot be resolved against
+    the event itself.
+
+    A client that is associated but holds no lease is labelled `(ip unknown)`
+    here rather than by name alone. Being *in* this map is what stops `_identity`
+    marking a device as unplaced, so a bare name would smuggle back exactly the
+    ambiguity the map exists to remove — known device, unknown address, rendered
+    as though the address were established.
+    """
+    out = {}
+    for c in clients(settings):
+        name, ip, mac = c.get("name"), c.get("ip"), c.get("mac")
+        if name and ip:
+            label = f"{name} ({ip})"
+        elif name:
+            label = f"{name} (ip unknown)"
+        else:
+            label = ip
+        if not label:
+            continue
+        for key in (mac, ip):
+            if key:
+                out[key] = label
+    return out
+
+
+def _identity(p: dict, idents: dict) -> str | None:
+    """One identity for one event parameter, however UniFi phrased it.
+
+    The `(ip unknown)` case is deliberate and is the fix for #59. A named client
+    that no longer appears in the associated-client list has no address here, and
+    saying so out loud is the only rendering that cannot be mistaken for one — a
+    bare `XpennoNas` beside an unrelated event mentioning `192.168.1.102` is
+    exactly what got welded into a wrong `serious` finding about the wrong host.
+    """
+    ident = idents.get(p.get("id"))
+    if ident:
+        return ident
+    name = p.get("name") or p.get("hostname")
+    # Some parameters (the gateway's own DEVICE block) carry an address inline,
+    # so they need no lookup to be canonical.
+    if name and p.get("ip"):
+        return f"{name} ({p['ip']})"
+    # An external address arrives with id == name == the IP. It has no name to
+    # be missing, so it must stay bare rather than gain "(ip unknown)".
+    if name and name != p.get("id"):
+        return f"{name} (ip unknown)"
+    return name or p.get("id")
+
+
+def _render_msg(raw: str, params: dict, idents: dict | None = None) -> str:
     """Fill a v2 system-log template ("{SRC_IP} blocked…") from its
-    parameters map, preferring human names over ids."""
+    parameters map, preferring human names over ids.
+
+    With `idents`, every device is rendered in one canonical form instead of
+    whichever of its two names UniFi happened to use for that event. Without it
+    the original behaviour is unchanged — the Ops page shows the event as the
+    UniFi UI words it, and the raw row travels alongside for single-event triage.
+    """
     def sub(m):
         p = (params or {}).get(m.group(1))
         if isinstance(p, dict):
+            if idents is not None:
+                return str(_identity(p, idents) or m.group(0))
             return str(p.get("name") or p.get("hostname") or p.get("id") or m.group(0))
         return str(p) if p is not None else m.group(0)
     return re.sub(r"\{([A-Z0-9_]+)\}", sub, raw or "")
 
 
 def events(settings: dict, categories: list | None = None,
-           page: int = 0, page_size: int = 50) -> dict:
+           page: int = 0, page_size: int = 50, idents: dict | None = None) -> dict:
     """Site events from the v2 system-log (the feed the UniFi UI uses).
 
     Verified live on UDM-SE fw 5.1.25 (2026-07-16): the v1 endpoints
     stat/event, list/alarm and stat/ips/event are gone; IDS/IPS blocks
     appear here as category SECURITY / subcategory
     SECURITY_INTRUSION_PREVENTION. The categories filter is server-side.
+
+    `idents` is `identities()`, and passing it renders one identity per device
+    (see `_render_msg`). Off by default so this stays the feed the UniFi UI
+    shows; the weekly report opts in because it is the caller that has to
+    *count* offending hosts, and counting one machine twice is what #59 was.
     """
     body = {"pageNumber": int(page), "pageSize": int(page_size)}
     if categories:
@@ -257,8 +349,8 @@ def events(settings: dict, categories: list | None = None,
             "event": x.get("event"),
             "severity": x.get("severity"),
             "status": x.get("status"),
-            "title": _render_msg(x.get("title_raw"), x.get("parameters")),
-            "message": _render_msg(x.get("message_raw"), x.get("parameters")),
+            "title": _render_msg(x.get("title_raw"), x.get("parameters"), idents),
+            "message": _render_msg(x.get("message_raw"), x.get("parameters"), idents),
             "raw": x,  # full row, fed to the AI triage
         })
     return {"events": out, "total": r.get("total_element_count"),

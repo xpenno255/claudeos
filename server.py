@@ -106,6 +106,16 @@ def route_system_test(_m, p, _b):
     return result
 
 
+def route_telegram_chat_ids(_m, _p, _b):
+    """Offer the chats that have messaged the bot, so nobody hand-builds a URL.
+
+    Not under /api/systems/<id>/test: this reads the stored token rather than
+    proving it works, and an empty result is a normal first state rather than a
+    failed test (#54).
+    """
+    return notify.telegram_chat_ids()
+
+
 def route_lab_issues(_m, _p, _b):
     # triage_available rides along so the UI can state the precondition up front
     # rather than offering a control that answers 404. `triage` and
@@ -486,6 +496,7 @@ ROUTES = [
     ("DELETE", r"^/api/systems/(?P<id>[a-z]+)$",                          route_system_delete),
     ("POST",   r"^/api/systems/(?P<id>[a-z]+)/test$",                     route_system_test),
     ("POST",   r"^/api/poll$",                                            route_poll_now),
+    ("POST",   r"^/api/notify/telegram/chat-ids$",                        route_telegram_chat_ids),
     ("GET",    r"^/api/labissues$",                                       route_lab_issues),
     ("POST",   r"^/api/labissues/(?P<number>\d+)/triage$",                route_lab_triage),
     ("GET",    r"^/api/labissues/(?P<number>\d+)/verdict$",               route_lab_verdict),
