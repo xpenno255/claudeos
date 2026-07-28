@@ -133,6 +133,28 @@ def channels(enabled_only: bool = True) -> list:
     return out
 
 
+def state() -> dict:
+    """Where alerting stands, for anything that needs to describe it.
+
+    Exists because the weekly report was *inferring* this from stale ops-log
+    lines and got it wrong (#53): it announced "no notification channel
+    configured" while Telegram was delivering. A caller should be told the
+    state, not left to deduce it from the wreckage.
+
+    `paused` is separate from `live` on purpose — a channel configured and then
+    switched off is a deliberate act, and reporting it as absent would be as
+    wrong as reporting it as working.
+    """
+    live = channels()
+    paused = [c for c in channels(enabled_only=False) if c not in live]
+    return {
+        "channels": [_label(c) for c in live],
+        "paused": [_label(c) for c in paused],
+        "any_configured": bool(live),
+        "gap": alerting_gap(),
+    }
+
+
 def send(title: str, message: str, priority: str = "default",
          tags: list | None = None, background: bool = True) -> None:
     """Fan an alert out to every enabled channel. Never raises.

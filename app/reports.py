@@ -194,6 +194,13 @@ def collect() -> dict:
     # the section says so itself rather than trusting the model to infer it.
     data["backups"] = soft(backups.report_section)
 
+    # Whether the report's own findings can reach anybody. Stated rather than
+    # left to be inferred: without this the only trace of alerting in the
+    # snapshot was whatever `recent_warnings` happened to hold, and a report
+    # once announced "no notification channel configured" while Telegram was
+    # delivering — reasoning correctly from a stale log line (#53).
+    data["alerting"] = soft(notify.state)
+
     data["metric_stats_last_hour"] = _metric_stats()
     return data
 

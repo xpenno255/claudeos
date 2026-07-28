@@ -20,6 +20,7 @@ needs a delivery to succeed substitutes the sender.
 """
 
 import importlib
+import json
 import os
 import shutil
 import sys
@@ -34,8 +35,10 @@ from app import oplog as _oplog  # noqa: E402
 from app import store as _store  # noqa: E402
 
 
-class ZeroChannelTest(unittest.TestCase):
-    """All three modules resolve paths under `DATA_DIR` at import, so a temp
+class _NotifyFixture(unittest.TestCase):
+    """Shared setup only — no tests of its own, so nothing here runs twice.
+
+    All three modules resolve paths under `DATA_DIR` at import, so a temp
     `CLAUDEOS_DATA` only takes effect after a reload, innermost first."""
 
     def setUp(self):
@@ -60,6 +63,10 @@ class ZeroChannelTest(unittest.TestCase):
 
     def configure_a_channel(self):
         self.store.save_system("webhook", {"host": "http://example.invalid/hook"})
+
+
+class ZeroChannelTest(_NotifyFixture):
+    """The reported bug and its boundaries."""
 
     # ------------------------------------------------------------ the record
 
@@ -140,6 +147,54 @@ class ZeroChannelTest(unittest.TestCase):
         self.store.delete_system("webhook")
         self.assertEqual(self.notify.channels(), [])
         self.assertIsNone(self.notify.alerting_gap())
+
+
+class StateTest(_NotifyFixture):
+    """`state()` exists because the weekly report was inferring alerting from
+    stale ops-log lines and announced "no notification channel configured"
+    while Telegram was delivering (#53).
+
+    It is tested for one thing beyond correctness: **it must not carry a
+    secret.** Its whole purpose is to be serialised into the report prompt and
+    sent to the Anthropic API, which is exactly the path #45 leaked a bot token
+    down. ntfy's topic *is* its credential, so a state that named channels by
+    their settings rather than their labels would leak one every week.
+    """
+
+    def test_it_reports_a_live_channel(self):
+        self.configure_a_channel()
+        st = self.notify.state()
+        self.assertTrue(st["any_configured"])
+        self.assertEqual(st["channels"], ["Webhook"])
+        self.assertEqual(st["paused"], [])
+
+    def test_it_reports_nothing_configured_as_nothing(self):
+        st = self.notify.state()
+        self.assertFalse(st["any_configured"])
+        self.assertEqual(st["channels"], [])
+
+    def test_a_paused_channel_is_neither_live_nor_absent(self):
+        """Switching a channel off is a deliberate act. Reporting it as absent
+        would be as wrong as reporting it as working."""
+        self.store.save_system("webhook", {"host": "http://x.invalid", "enabled": False})
+        st = self.notify.state()
+        self.assertEqual(st["channels"], [])
+        self.assertEqual(st["paused"], ["Webhook"])
+        self.assertFalse(st["any_configured"])
+
+    def test_it_carries_the_gap_so_lost_alerts_are_reportable(self):
+        self.raise_alert()
+        self.assertIsNotNone(self.notify.state()["gap"])
+
+    def test_no_secret_reaches_the_state(self):
+        """The report prompt goes to the Anthropic API. ntfy's topic is its only
+        credential, so it must never appear here — #45's lesson, one layer up."""
+        self.store.save_system("ntfy", {"topic": "s3cret-topic-value"})
+        self.store.save_system("telegram", {"bot_token": "8000000000:AAsecrethalf",
+                                            "chat_id": "123"})
+        blob = json.dumps(self.notify.state())
+        for secret in ("s3cret-topic-value", "AAsecrethalf", "8000000000:AAsecrethalf"):
+            self.assertNotIn(secret, blob, f"{secret!r} must not reach the report")
 
 
 if __name__ == "__main__":
