@@ -1,7 +1,10 @@
 """Claude-powered analysis for ClaudeOS.
 
-Calls the Anthropic Messages API (model: claude-opus-4-8) with structured
-JSON output so results render as ranked, categorised findings.
+Calls the Anthropic Messages API with structured JSON output so results render
+as ranked, categorised findings. `MODEL` below is the only place the *analysis*
+model is named — the agentic loop names its own in `app/toolloop.py` — and every
+result carries it back in `_usage`, so nothing downstream keeps a copy and no
+view has to guess (#62).
 
 Preferred path: the official `anthropic` SDK (installed in .venv — run the
 server with .venv/bin/python3). It provides automatic retries on 429/5xx
@@ -22,7 +25,7 @@ except ImportError:
     HAS_SDK = False
 
 API_URL = "https://api.anthropic.com/v1/messages"
-MODEL = "claude-opus-4-8"
+MODEL = "claude-opus-5"
 API_VERSION = "2023-06-01"
 TIMEOUT = 540  # Opus with adaptive thinking can take minutes on big logs
 
@@ -155,8 +158,13 @@ def _sdk_ask_json(key: str, system_prompt: str, user_text: str, schema: dict,
     if resp.stop_reason == "max_tokens":
         raise ValueError("analysis was truncated — try again (the log slice may be too large)")
     out = json.loads(text)
+    # The model rides back with the counts it produced. A stored result outlives
+    # the constant that made it — bump MODEL and yesterday's analysis was still
+    # produced by yesterday's model — so the answer to "what ran" belongs with
+    # the result, not with whatever is configured when someone later looks (#62).
     out["_usage"] = {"input_tokens": resp.usage.input_tokens,
-                     "output_tokens": resp.usage.output_tokens}
+                     "output_tokens": resp.usage.output_tokens,
+                     "model": resp.model or MODEL}
     return out
 
 
@@ -216,8 +224,11 @@ def _raw_ask_json(key: str, system_prompt: str, user_text: str, schema: dict,
         raise ValueError("analysis was truncated — try again (the log slice may be too large)")
     out = json.loads(text)
     usage = resp.get("usage", {})
+    # Same shape as the SDK path — the two must agree, because everything
+    # downstream reads `_usage` without knowing which one ran.
     out["_usage"] = {"input_tokens": usage.get("input_tokens"),
-                     "output_tokens": usage.get("output_tokens")}
+                     "output_tokens": usage.get("output_tokens"),
+                     "model": resp.get("model") or MODEL}
     return out
 
 

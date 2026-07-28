@@ -303,10 +303,32 @@ class MeterTest(unittest.TestCase):
     def test_the_model_the_price_was_checked_against_is_recorded(self):
         """A hand-checked rate outlives the model it was checked against, so the
         report says which one it priced — otherwise a future tier change is
-        undetectable after the fact."""
+        undetectable after the fact.
+
+        This is the fallback path: a usage block that names no model is priced
+        against the configured one. Accurate rather than a guess — pricing only
+        ever happens at generation time, so the constant is the model that just
+        ran. A *view* reading old data has no such guarantee, which is why it says
+        "model unknown" instead of borrowing this fallback (#62).
+        """
         report = self.generate({"input_tokens": 10, "output_tokens": 1})
 
         self.assertEqual(report["cost"]["model"], _reports.ai.MODEL)
+
+    def test_the_cost_records_the_model_that_actually_ran(self):
+        """And when the usage *does* name one, that wins over the constant.
+
+        A stored report outlives the constant that produced it. Pricing against
+        `ai.MODEL` would relabel every past report with whatever is configured at
+        the moment of pricing — across a version bump, a claim that is simply
+        untrue about output that already exists (#62).
+        """
+        report = self.generate({"input_tokens": 10, "output_tokens": 1,
+                                "model": "claude-opus-4-8"})
+
+        self.assertEqual(report["cost"]["model"], "claude-opus-4-8")
+        self.assertNotEqual(report["cost"]["model"], _reports.ai.MODEL,
+                            "the reported model was ignored in favour of the constant")
 
     def test_an_unmeasured_report_costs_none_not_zero(self):
         """Zero is a claim that the call was free. None is a claim that nobody

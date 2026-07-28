@@ -50,8 +50,20 @@ def _async_poll() -> None:
 def route_overview(_m, _p, _b):
     # alerting_gap is null unless alerts have actually been discarded for want of
     # a channel, so the dashboard can render it unconditionally.
+    #
+    # `models` answers a different question from the model on an analysis result,
+    # and the difference is why both exist (#62). A result's `_usage.model` says
+    # what produced *that output* — fixed forever, whatever is configured later.
+    # This says what the app *will call next*, which is the only thing the Setup
+    # card can honestly claim, because it describes a capability rather than
+    # something that already happened.
+    #
+    # Only the analysis model is here. The agentic one is already reported by the
+    # two routes whose views need it, and adding a second copy would have left it
+    # emitted and unread — the exact thing #62 removed, reintroduced one level up.
     return {"systems": poller.snapshot(), "config": store.public_summary(),
-            "labels": SYSTEM_LABELS, "alerting_gap": notify.alerting_gap()}
+            "labels": SYSTEM_LABELS, "alerting_gap": notify.alerting_gap(),
+            "models": {"analysis": ai.MODEL}}
 
 
 def route_history(_m, _p, _b):

@@ -210,10 +210,15 @@ function queue(snap, issues, toast) {
     el("div", { class: "panel" },
       el("div", { class: "panel-title" }, `LAB ISSUE QUEUE — ${issues.length} OPEN`),
       table(snap, issues, toast),
+      // `snap.model` and `snap.triage_label` are both the server's answer, not
+      // this view's. The route has emitted the model since triage shipped and
+      // nothing read it, which is how the Ops footers ended up carrying their own
+      // copies instead (#62).
       el("div", { class: "mono-dim", style: "margin-top:10px" },
         `A triage run is read-only against the lab: it gathers evidence and posts a verdict `
         + `to the issue, then marks it ${snap.triage_label}. It never changes anything. `
-        + `Remove that label on GitHub to make an issue eligible again.`)));
+        + `Remove that label on GitHub to make an issue eligible again. `
+        + `Runs on ${snap.model || "the configured model"}.`)));
 }
 
 // ---------------------------------------------------------------- the budget
