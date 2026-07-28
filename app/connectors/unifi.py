@@ -253,11 +253,22 @@ def identities(settings: dict) -> dict:
     The join is on MAC, not on name: `{SRC_CLIENT}` carries a hostname with no
     address at all, so a name is the one thing that cannot be resolved against
     the event itself.
+
+    A client that is associated but holds no lease is labelled `(ip unknown)`
+    here rather than by name alone. Being *in* this map is what stops `_identity`
+    marking a device as unplaced, so a bare name would smuggle back exactly the
+    ambiguity the map exists to remove — known device, unknown address, rendered
+    as though the address were established.
     """
     out = {}
     for c in clients(settings):
         name, ip, mac = c.get("name"), c.get("ip"), c.get("mac")
-        label = f"{name} ({ip})" if name and ip else (name or ip)
+        if name and ip:
+            label = f"{name} ({ip})"
+        elif name:
+            label = f"{name} (ip unknown)"
+        else:
+            label = ip
         if not label:
             continue
         for key in (mac, ip):
