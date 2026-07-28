@@ -1417,6 +1417,20 @@ function scheduleFailure(cfg) {
       "Run one by hand to retry now — a successful report clears this."));
 }
 
+// What the kept reports have cost. Scoped honestly: this is the last 12 reports,
+// not all time, and it names how many entries carry no cost so a partial total
+// can't read as a complete one (#60).
+function spendLine(spend) {
+  if (!spend || !spend.reports) return null;
+  const unmetered = spend.unmetered
+    ? ` · ${spend.unmetered} earlier report${spend.unmetered > 1 ? "s" : ""} not measured`
+    : "";
+  return el("div", { class: "mono-dim", style: "margin-bottom:10px" },
+    `Spend on the ${spend.reports} report${spend.reports > 1 ? "s" : ""} kept here: `,
+    el("span", { style: "color:var(--text)" }, `$${spend.usd.toFixed(4)}`),
+    unmetered);
+}
+
 async function reports(body, toast) {
   const state = await api.reports();
   const cfg = state.config || {};
@@ -1466,6 +1480,7 @@ async function reports(body, toast) {
       "A weekly snapshot of the whole lab — gateway health, security events, Proxmox, Docker, HA/ZHA, ",
       "uptime monitors, warnings — digested by Claude into a graded report with ranked findings. ",
       "The summary is delivered through your notification channels; full reports live here (last 12 kept)."),
+    spendLine(state.spend),
     el("div", { style: "display:flex;gap:14px;align-items:center;flex-wrap:wrap" },
       el("label", { class: "check", style: "margin:0" }, enabled, "run weekly on"),
       day, el("span", { class: "mono-dim" }, "at"), hour,
@@ -1518,8 +1533,19 @@ function reportBody(r) {
   const items = [...(r.findings || [])].sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9));
   if (!items.length) parts.push(el("div", { class: "pill ok" }, "● NO ISSUES FOUND"));
   for (const f of items) parts.push(findingCard(f));
-  if (r._usage) parts.push(el("div", { class: "mono-dim", style: "margin-top:6px" },
-    `claude-opus-4-8 · ${r._usage.input_tokens ?? "?"} in / ${r._usage.output_tokens ?? "?"} out tokens`));
+  // The report's own price, beside the report — a cost nobody sees is barely
+  // better than none (#60). A report with no `cost` predates the meter, so it
+  // says "not measured" rather than implying the call was free.
+  const c = r.cost;
+  if (r._usage || c) {
+    parts.push(el("div", { class: "mono-dim", style: "margin-top:6px" },
+      `${c?.model || "claude-opus-4-8"} · `
+      + `${r._usage?.input_tokens ?? c?.input ?? "?"} in / `
+      + `${r._usage?.output_tokens ?? c?.output ?? "?"} out tokens · `,
+      typeof c?.usd === "number"
+        ? el("span", { style: "color:var(--text)" }, `$${c.usd.toFixed(4)}`)
+        : "cost not measured"));
+  }
   return parts;
 }
 

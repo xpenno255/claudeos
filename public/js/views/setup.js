@@ -122,12 +122,17 @@ const NOTIFY_FORMS = [
   {
     id: "telegram",
     title: "TELEGRAM BOT",
-    note: "Create a bot with @BotFather (/newbot) to get the token. Send your bot one message, then read your chat id from api.telegram.org/bot<TOKEN>/getUpdates (or ask @userinfobot).",
+    note: "Create a bot with @BotFather (/newbot) to get the token. For the chat id, message @userinfobot — in a one-to-one chat your chat id IS your own Telegram user id, which is the same for every bot and survives rotating the token. Or paste the token, press SAVE, send your bot a message, and let DETECT CHAT ID read it server-side. Never open api.telegram.org/bot<TOKEN>/… in a browser: that puts a live token in your URL history, and fetching updates without an offset consumes the very message you were trying to read.",
     fields: [
-      { key: "bot_token", label: "BOT TOKEN", secret: true, hint: "123456789:AA… from @BotFather" },
-      { key: "chat_id", label: "CHAT ID", placeholder: "123456789" },
+      { key: "bot_token", label: "BOT TOKEN", secret: true,
+        hint: "123456789:AA… from @BotFather — paste it here only, never into a browser address bar" },
+      { key: "chat_id", label: "CHAT ID", placeholder: "your own user id — not the bot's",
+        hint: "your Telegram user id, from @userinfobot or DETECT below. NOT the digits before the colon in the bot token — that is the bot itself, and sending to it fails with \"the bot can't send messages to the bot\"" },
     ],
     enabledToggle: true,
+    // The app already holds the token, so finding the chat id should be one
+    // click rather than an instruction that leaks it (#54).
+    detectChatId: true,
   },
   {
     id: "pushover",
@@ -278,6 +283,52 @@ function card(form, cfg, status, toast) {
     }
   }
 
+  // Chat-id detection: read the chats the bot can see using the token the
+  // server already holds, and offer them as buttons that fill the field. The
+  // point is that the owner never handles the token again — see notify.
+  // telegram_chat_ids for why this is a server call and not a better hint.
+  const detect = el("div", { class: "setup-result" });
+  let detectBtn = null;
+  if (form.detectChatId) {
+    detectBtn = el("button", { class: "btn btn-ghost" }, "◈ DETECT CHAT ID");
+    detectBtn.addEventListener("click", async () => {
+      detectBtn.disabled = true;
+      detect.className = "setup-result";
+      detect.textContent = "… asking Telegram which chats have messaged your bot";
+      try {
+        const { chats } = await api.telegramChatIds();
+        if (!chats.length) {
+          // An empty queue is the normal first state, not a fault. Saying
+          // "error" here would send someone debugging a working setup.
+          detect.className = "setup-result";
+          detect.replaceChildren(el("div", {},
+            "No messages yet — send your bot any message in Telegram, then press this again."));
+          return;
+        }
+        detect.className = "setup-result ok";
+        detect.replaceChildren(
+          el("div", { style: "margin-bottom:6px" },
+            `✓ ${chats.length} chat${chats.length > 1 ? "s" : ""} found — pick the one to alert:`),
+          el("div", { style: "display:flex;gap:6px;flex-wrap:wrap" },
+            ...chats.map(c => {
+              const pick = el("button", { class: "btn btn-mini" },
+                `${c.label} · ${c.chat_id}`);
+              pick.addEventListener("click", () => {
+                inputs.chat_id.value = c.chat_id;
+                detect.className = "setup-result ok";
+                detect.textContent = `✓ chat id ${c.chat_id} filled in — press SAVE + TEST`;
+              });
+              return pick;
+            })));
+      } catch (e) {
+        detect.className = "setup-result err";
+        detect.textContent = `✕ ${e.message}`;
+      } finally {
+        detectBtn.disabled = false;
+      }
+    });
+  }
+
   const removeBtn = el("button", { class: "btn btn-mini btn-danger" }, "UNLINK");
   let armed = false;
   removeBtn.addEventListener("click", async () => {
@@ -306,6 +357,8 @@ function card(form, cfg, status, toast) {
     el("div", { class: "setup-actions" },
       el("button", { class: "btn", onclick: () => save(true) }, "SAVE + TEST"),
       el("button", { class: "btn btn-ghost", onclick: () => save(false) }, "SAVE"),
+      detectBtn,
       configured ? removeBtn : null),
+    detectBtn ? detect : null,
     result);
 }
