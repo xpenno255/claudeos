@@ -169,12 +169,25 @@ def send(title: str, message: str, priority: str = "default",
         _last_sent[title] = now
     if background:
         threading.Thread(target=_fan_out, args=(title, message, priority, tags),
+                         kwargs={"delays": RETRY_DELAYS_S},
                          name="claudeos-notify", daemon=True).start()
     else:
-        _fan_out(title, message, priority, tags)
+        # A caller that waits on delivery must not wait out the retries.
+        _fan_out(title, message, priority, tags, delays=())
 
 
-def _fan_out(title, message, priority, tags):
+# Waits before each re-attempt at a channel that failed, in seconds (about 5
+# minutes in all). Every caller alerts once per *transition* and records the
+# transition before it sends, so whatever this send loses is lost for good: a
+# failing backup, a host going down, a SMART warning is never raised a second
+# time. One attempt with a 6s timeout used to be all an alert got, so one
+# Telegram blip ate it, with only an ops-log line left behind, and nobody reads
+# that until they already suspect something. Runs on the notify thread, so
+# nothing waits on it.
+RETRY_DELAYS_S = (15, 60, 240)
+
+
+def _fan_out(title, message, priority, tags, *, delays=(), sleep=time.sleep):
     live = channels()
     if not live:
         # Nowhere to send: not a delivery failure, because nothing was attempted
@@ -184,16 +197,31 @@ def _fan_out(title, message, priority, tags):
         oplog.add("warn", "notify", f'alert "{title}" had nowhere to go '
                                     "— no notification channel is configured")
         return
-    sent, failed = [], []
-    for cid in live:
-        try:
-            _SENDERS[cid](_channel_settings(cid), title, message, priority, tags)
-            sent.append(_label(cid))
-        except Exception as e:  # noqa: BLE001 — one dead channel must not stop the rest
-            failed.append(_label(cid))
-            oplog.add("warn", "notify", f"{_label(cid)} delivery failed: {e}")
+    sent, pending = [], list(live)
+    attempts = 0
+    for wait in (0, *delays):
+        if not pending:
+            break
+        if wait:
+            sleep(wait)
+        attempts += 1
+        failing = []
+        for cid in pending:
+            try:
+                _SENDERS[cid](_channel_settings(cid), title, message, priority, tags)
+                sent.append(_label(cid))
+            except Exception as e:  # noqa: BLE001 — one dead channel must not stop the rest
+                failing.append(cid)
+                oplog.add("warn", "notify",
+                          f"{_label(cid)} delivery failed (attempt {attempts}): {e}")
+        pending = failing
     if sent:
         oplog.add("info", "notify", f'alert "{title}" sent via {", ".join(sent)}')
+    if pending:
+        # The line that says the alert itself is gone, as opposed to one try failing.
+        oplog.add("error", "notify",
+                  f'alert "{title}" was not delivered via '
+                  f'{", ".join(_label(c) for c in pending)} after {attempts} attempts')
     _clear_gap()
 
 

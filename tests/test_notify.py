@@ -12,11 +12,18 @@ disk warning had all been going nowhere, silently, since they shipped.
 Expensive is the disk: SMART sends at `urgent` because the window to act is
 short, and a warning nobody receives spends that window.
 
-Only the zero-channel path is covered. A channel that is configured and then
-fails already logged per-channel and was never the silent case, and nothing else
-in `notify.py` is tested — this file is not an invitation to change that. No
-network: the gap is recorded before any sender is reached, and the one test that
-needs a delivery to succeed substitutes the sender.
+The zero-channel path was all this file covered at first, on the reasoning that a
+configured channel that fails logs per-channel and is not the silent case. That
+turned out wrong in practice, so `RetryTest` covers the second path. On
+2026-11-20 every Telegram call from the live instance was timing out. The last
+alert that got through was 31 hours earlier, and nothing showed the gap, because
+the only record was ops-log lines, and #41 already established that nobody reads
+those unprompted. Worse, every caller latches its transition *before* sending, so
+an alert lost to one blip is never raised again. Retries and a final "not
+delivered" line are tested. Nothing else in `notify.py` is, and this file is not
+an invitation to change that. No network: the gap is recorded before any sender
+is reached, and every test that needs a delivery to succeed or fail substitutes
+the sender.
 """
 
 import importlib
@@ -203,3 +210,71 @@ class StateTest(_NotifyFixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RetryTest(_NotifyFixture):
+    """A configured channel that fails is retried before the alert is given up.
+
+    Every caller alerts once per transition and has already recorded that
+    transition, so this send is the only one there will ever be. Sleeps are
+    substituted, so nothing here waits."""
+
+    def setUp(self):
+        super().setUp()
+        self.configure_a_channel()
+        self.waits = []
+
+    def fan_out(self, sender):
+        self.notify._SENDERS["webhook"] = sender
+        self.notify._fan_out("Backup failed: orca-hub", "m", "high", None,
+                             delays=self.notify.RETRY_DELAYS_S, sleep=self.waits.append)
+
+    def test_a_blip_is_retried_and_the_alert_arrives(self):
+        calls = []
+
+        def flaky(*a):
+            calls.append(1)
+            if len(calls) == 1:
+                raise ConnectionError("timeout reaching https://api.telegram.org/bot•••/sendMessage")
+        self.fan_out(flaky)
+        self.assertEqual(len(calls), 2, "the failed channel must be tried again")
+        self.assertEqual(self.waits, [self.notify.RETRY_DELAYS_S[0]])
+        self.assertTrue(any("sent via Webhook" in m for m in self.log_lines()))
+        self.assertFalse(any("was not delivered" in m for m in self.log_lines()))
+
+    def test_an_alert_that_never_gets_through_says_so_once(self):
+        """Per-attempt warnings read like routine noise. The alert being lost is
+        a different fact and gets its own line, naming the alert."""
+        def dead(*a):
+            raise ConnectionError("timeout")
+        self.fan_out(dead)
+        self.assertEqual(self.waits, list(self.notify.RETRY_DELAYS_S))
+        lost = [e for e in self.oplog.recent(50)
+                if e["system"] == "notify" and "was not delivered" in e["message"]]
+        self.assertEqual(len(lost), 1)
+        self.assertEqual(lost[0]["level"], "error", "the weekly report sweeps warn and error")
+        self.assertIn("Backup failed: orca-hub", lost[0]["message"])
+
+    def test_a_working_channel_is_not_sent_twice_while_another_retries(self):
+        self.store.save_system("ntfy", {"topic": "t"})
+        got = {"ntfy": 0, "webhook": 0}
+
+        def ok(*a):
+            got["ntfy"] += 1
+        self.notify._SENDERS["ntfy"] = ok
+
+        def dead(*a):
+            got["webhook"] += 1
+            raise ConnectionError("timeout")
+        self.fan_out(dead)
+        self.assertEqual(got["ntfy"], 1, "a duplicate push is its own failure")
+        self.assertEqual(got["webhook"], 1 + len(self.notify.RETRY_DELAYS_S))
+
+    def test_a_caller_that_waits_is_not_held_for_the_retries(self):
+        """`background=False` blocks its caller, so it gets one attempt."""
+        def dead(*a):
+            raise ConnectionError("timeout")
+        self.notify._SENDERS["webhook"] = dead
+        self.raise_alert()
+        self.assertTrue(any("was not delivered" in m and "after 1 attempts" in m
+                            for m in self.log_lines()))
