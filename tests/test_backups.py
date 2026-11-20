@@ -326,6 +326,48 @@ class ReportedOkTest(BackupsTestCase):
                 self.assertTrue(self.b.reported_ok({"ok": v}))
 
 
+class PingBodyTest(BackupsTestCase):
+    """What a ping's *body* records, before `reported_ok` ever sees it (#71).
+
+    `ReportedOkTest` covers a payload that parsed. This covers one that didn't.
+    `-d '{"ok":'$rc'}'` with an empty `$rc` sends `{"ok":}`, and the server used
+    to read that as "no body", which is the documented success ping. The one
+    signal a failing job managed to send became a green row, through a path
+    `ReportedOkTest` never reached.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from app import body
+        self.body = body
+
+    def test_no_body_is_still_success(self):
+        self.assertIsNone(self.body.parse(b""))
+        self.assertTrue(self.b.ping_fields(None)["ok"])
+
+    def test_an_unparseable_body_is_a_failure_that_says_why(self):
+        for raw in (b'{"ok":}', b'{"ok": false, "detail": "it said "no""}', b"\xff\xfe"):
+            with self.subTest(raw=raw):
+                parsed = self.body.parse(raw)
+                self.assertIs(parsed, self.body.UNPARSEABLE)
+                f = self.b.ping_fields(parsed)
+                self.assertFalse(f["ok"], f"{raw!r} must not record a success")
+                self.assertIn("not valid JSON", f["detail"])
+
+    def test_json_that_is_not_an_object_is_a_failure(self):
+        """`-d "$rc"` sends a bare number."""
+        for raw in (b"0", b"1", b'"failed"', b"[]"):
+            with self.subTest(raw=raw):
+                self.assertFalse(self.b.ping_fields(self.body.parse(raw))["ok"])
+
+    def test_a_well_formed_body_reaches_the_record(self):
+        f = self.b.ping_fields(self.body.parse(b'{"ok": true, "bytes": 3546657, "detail": "fine"}'))
+        self.assertEqual((f["ok"], f["size_bytes"], f["detail"]), (True, 3546657, "fine"))
+
+    def test_unparseable_is_truthy_so_body_or_empty_cannot_launder_it(self):
+        self.assertIs(self.body.UNPARSEABLE or {}, self.body.UNPARSEABLE)
+
+
 class TokenExposureTest(BackupsTestCase):
     """The token is a bearer credential: holding one is enough to report a
     backup healthy. #45 was the same carelessness with a Telegram token."""

@@ -23,7 +23,7 @@ import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from app import (ai, backups, chat, labissues, monitors, notify, oplog, poller, registry,
+from app import (ai, backups, body as reqbody, chat, labissues, monitors, notify, oplog, poller, registry,
                  reports, requestguard, scanner, smart, store, triagelog)
 from app.connectors import CONNECTORS, docker, homeassistant, proxmox, synology, unifi
 from app.httpclient import HttpError
@@ -357,11 +357,7 @@ def route_backup_ping(_m, p, body):
         # Deliberately identical to any other unknown route: a distinct error
         # would let someone probe for valid tokens.
         raise LookupError("not found")
-    b = body or {}
-    run = backups.record_run(
-        job["id"], ok=backups.reported_ok(b),
-        size_bytes=b.get("bytes"), duration_s=b.get("duration_s"),
-        detail=b.get("detail"))
+    run = backups.record_run(job["id"], **backups.ping_fields(body))
     return {"ok": True, "recorded": run["ts"]}
 
 
@@ -581,6 +577,8 @@ ROUTES = [
 ]
 
 
+_UNPARSEABLE_MSG = "request body is not valid JSON; nothing was changed"
+
 _refusals_noted: set = set()
 
 
@@ -707,14 +705,14 @@ class Handler(BaseHTTPRequestHandler):
 
     # -------------------------------------------------------- dispatch
     def _read_body(self):
-        length = int(self.headers.get("Content-Length") or 0)
-        if not length:
-            return None
-        raw = self.rfile.read(length)
+        """`None`, the JSON value, or `reqbody.UNPARSEABLE` (#71, app/body.py)."""
         try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return reqbody.UNPARSEABLE
+        if length <= 0:
             return None
+        return reqbody.parse(self.rfile.read(length))
 
     def _dispatch(self, method):
         path = urllib.parse.urlparse(self.path).path
@@ -731,11 +729,15 @@ class Handler(BaseHTTPRequestHandler):
         # Streaming chat routes bypass the JSON wrapper entirely.
         if method == "POST" and path in ("/api/chat/stream",):
             body = self._read_body() or {}
+            if body is reqbody.UNPARSEABLE:
+                return self._send_json({"error": _UNPARSEABLE_MSG}, 400)
             return self._stream(lambda: chat.run_turn(
                 str(body.get("message", "")).strip(), body.get("conversation_id")))
         m = re.match(r"^/api/chat/(?P<cid>[0-9a-f]+)/approve$", path)
         if method == "POST" and m:
             body = self._read_body() or {}
+            if body is reqbody.UNPARSEABLE:
+                return self._send_json({"error": _UNPARSEABLE_MSG}, 400)
             cid = m.group("cid")
             return self._stream(lambda: chat.run_approval(
                 cid, str(body.get("pending_id", "")),
@@ -748,8 +750,12 @@ class Handler(BaseHTTPRequestHandler):
                     continue
                 match = re.match(pattern, path)
                 if match:
+                    body = self._read_body()
+                    # Only the ping has a use for a body it can't read (#71).
+                    if body is reqbody.UNPARSEABLE and fn is not route_backup_ping:
+                        return self._send_json({"error": _UNPARSEABLE_MSG}, 400)
                     try:
-                        return self._send_json(fn(method, match.groupdict(), self._read_body()))
+                        return self._send_json(fn(method, match.groupdict(), body))
                     except LookupError as e:
                         return self._send_json({"error": str(e)}, 404)
                     except ValueError as e:
