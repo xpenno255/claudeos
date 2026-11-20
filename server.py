@@ -23,8 +23,8 @@ import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from app import (ai, backups, body as reqbody, chat, labissues, monitors, notify, oplog, poller, registry,
-                 reports, requestguard, scanner, smart, store, triagelog)
+from app import (ai, attention, backups, body as reqbody, chat, labissues, monitors, notify, oplog,
+                 poller, registry, reports, requestguard, scanner, smart, store, triagelog)
 from app.connectors import CONNECTORS, docker, homeassistant, proxmox, synology, unifi
 from app.httpclient import HttpError
 
@@ -64,6 +64,13 @@ def route_overview(_m, _p, _b):
     return {"systems": poller.snapshot(), "config": store.public_summary(),
             "labels": SYSTEM_LABELS, "alerting_gap": notify.alerting_gap(),
             "models": {"analysis": ai.MODEL}}
+
+
+def route_attention(_m, _p, _b):
+    # What needs the owner, from state the app already holds — no source here
+    # polls or calls out, so the dashboard can ask on every refresh. A source
+    # that fails is an item saying so, never a gap in the list (#75).
+    return attention.collect()
 
 
 def route_history(_m, _p, _b):
@@ -508,6 +515,7 @@ def route_ha_service(_m, _p, body):
 
 ROUTES = [
     ("GET",    r"^/api/overview$",                                        route_overview),
+    ("GET",    r"^/api/attention$",                                       route_attention),
     ("GET",    r"^/api/history$",                                         route_history),
     ("GET",    r"^/api/log$",                                             route_log),
     ("GET",    r"^/api/systems$",                                         route_systems_get),

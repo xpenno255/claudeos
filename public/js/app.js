@@ -1,7 +1,7 @@
 // ClaudeOS shell: hash router, rail status, clock, sync button, toasts.
 
 import { api } from "./api.js";
-import { el } from "./util.js";
+import { el, timeAgo } from "./util.js";
 import { SYSTEMS } from "./meta.js";
 import { renderDashboard } from "./views/dashboard.js";
 import { renderOps } from "./views/ops.js";
@@ -67,14 +67,22 @@ window.addEventListener("hashchange", navigate);
 
 // ---------------------------------------------------------------- rail
 
-function renderRail(overview) {
+// `attention` is null when that check failed, and then the rail says only what
+// it can see — up or down — rather than implying the systems were checked.
+function renderRail(overview, attention) {
+  const flagged = new Set((attention?.items || [])
+    .filter(i => i.severity !== "info").map(i => i.system));
   const rows = SYSTEMS.map(s => {
     const st = overview.systems?.[s.id] || {};
-    const cls = st.ok === true ? "ok" : st.ok === false ? "err" : "off";
+    // UP used to mean only that the API answered (#75); WARN is answering
+    // with something on the dashboard's attention strip.
+    const warn = st.ok === true && flagged.has(s.id);
+    const cls = st.scheduled_off ? "sleep" : warn ? "warn" : st.ok === true ? "ok" : st.ok === false ? "err" : "off";
+    const word = st.scheduled_off ? "ASLEEP" : warn ? "WARN" : st.ok === true ? "UP" : st.ok === false ? "DOWN" : "—";
     return el("a", { class: "rail-sys", href: `#/ops/${s.tab}`, title: `open ${s.label} operations` },
       el("span", { class: `led ${cls}` }),
       el("span", { class: "sys-name" }, s.label),
-      el("span", { class: "mono-dim" }, st.ok === true ? "UP" : st.ok === false ? "DOWN" : "—"));
+      el("span", { class: "mono-dim" }, word));
   });
   railSystems.replaceChildren(el("h6", {}, "SYSTEMS"), ...rows);
   const anyLive = Object.values(overview.systems || {}).some(s => s.ok === true);
@@ -82,8 +90,40 @@ function renderRail(overview) {
   pollIndicator.innerHTML = `<span class="dot"></span> ${anyLive ? "LINK ACTIVE" : "LINK IDLE"}`;
 }
 
+// Two misses before the rail stops vouching for its last render — the same
+// threshold as the dashboard. Until then a blip just ages the data.
+const STALE_AFTER = 2;
+let railOkAt = null;
+let railMisses = 0;
+
+function setStale(stale) {
+  document.body.classList.toggle("server-stale", stale);
+  document.getElementById("stale-flag").hidden = !stale;
+  if (stale) {
+    pollIndicator.classList.remove("live");
+    pollIndicator.innerHTML = `<span class="dot"></span> ▲ STALE — SERVER UNREACHABLE`;
+  }
+}
+
 async function refreshRail() {
-  try { renderRail(await api.overview()); } catch { /* server unreachable; keep last */ }
+  try {
+    const [overview, attention] = await Promise.all([
+      api.overview(), api.attention().catch(() => null)]);
+    renderRail(overview, attention);
+    railOkAt = Date.now();
+    railMisses = 0;
+    setStale(false);
+  } catch {
+    railMisses += 1;
+    if (railMisses >= STALE_AFTER) setStale(true);
+  }
+  tickAge();
+}
+
+function tickAge() {
+  document.getElementById("data-age").textContent = railOkAt === null
+    ? (railMisses ? "NO DATA — SERVER UNREACHABLE" : "")
+    : `DATA ${timeAgo(railOkAt / 1000).toUpperCase()}`;
 }
 
 // ---------------------------------------------------------------- clock
@@ -91,6 +131,7 @@ async function refreshRail() {
 function tickClock() {
   document.getElementById("clock").textContent =
     new Date().toLocaleTimeString([], { hour12: false });
+  tickAge();
 }
 setInterval(tickClock, 1000);
 tickClock();

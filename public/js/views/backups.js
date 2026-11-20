@@ -5,7 +5,7 @@
 // severity order (backups._SEVERITY) so the ordering is one decision, not two.
 
 import { api } from "../api.js";
-import { el, fmtBytes, timeAgo } from "../util.js";
+import { el, fmtBytes, timeAgo, couldNotLoad } from "../util.js";
 import { sparkline } from "../charts.js";
 
 // `never` deliberately reads as a warning, not a neutral blank. A job added and
@@ -27,7 +27,15 @@ const BLURB = {
 };
 
 export async function renderBackups(body, toast) {
-  const data = await api.backups().catch(() => ({ jobs: [], counts: {} }));
+  // A failed fetch used to become an empty list, which this tab renders as
+  // "NOTHING TRACKED" — a claim about the lab made from no evidence (#75).
+  let data;
+  try {
+    data = await api.backups();
+  } catch (e) {
+    body.append(couldNotLoad("The backup list", e));
+    return;
+  }
   const jobs = data.jobs || [];
   const counts = data.counts || {};
   const discoveryError = data.discovery_error;
@@ -54,7 +62,9 @@ export async function renderBackups(body, toast) {
     }
   });
 
-  body.append(
+  // Native append, unlike el(), turns a null child into the text "null" — which
+  // is what a healthy discovery used to print above the form.
+  body.append(...[
     el("div", { class: "ops-toolbar" },
       el("span", { class: `pill ${bad ? "err" : counts.never ? "warn" : jobs.length ? "ok" : "neutral"}` },
         bad ? `✕ ${bad} NEED ATTENTION`
@@ -96,7 +106,8 @@ export async function renderBackups(body, toast) {
               ? "Discovery is failing, so this is not 'nothing to back up' — it is 'we could not look'. "
               : "This is not a clean bill of health — it means nothing is being watched. ",
             "Add a heartbeat job and paste one line into an existing backup script, ",
-            "or link Proxmox on the Setup page to discover vzdump schedules automatically.")));
+            "or link Proxmox on the Setup page to discover vzdump schedules automatically.")),
+  ].filter(Boolean));
 }
 
 function row(j, toast) {

@@ -21,7 +21,7 @@ the AI features — with automatic retries and typed errors. Plain
 
 | Page | What it does |
 |---|---|
-| **Dashboard** | Status tile per system with a one-hour sparkline, Proxmox node CPU/MEM/disk meters, WAN health & ISP latency, container states, HA summary, live ops log |
+| **Dashboard** | A **needs attention** strip (failing backups, monitors down, lost alerts, disk thresholds, open serious lab issues, report schedule — or COULD NOT CHECK when it cannot tell), status tile per system with a one-hour sparkline, Proxmox node CPU/MEM/disk meters, WAN health & ISP latency, container states, HA summary, live ops log |
 | **Operations → Network** | UniFi devices & clients, restart devices |
 | **Operations → Compute** | VMs/LXCs (start/shutdown/reboot/stop), **datastores** with usage, **node performance** (CPU, IO delay, load, network — from PVE RRD) |
 | **Operations → Containers** | Start/stop/restart, host vitals incl. **GPU utilisation & VRAM history**, on-demand **storage analysis** (largest images / writable layers / volumes, reclaimable space) |
@@ -187,6 +187,7 @@ scheduled agent) can operate the lab through the same audited path:
 
 ```
 GET  /api/overview                                     # everything, one call
+GET  /api/attention                                    # what needs a human, worst first; a failed check is an item
 GET  /api/history                                      # sparkline ring buffers
 GET  /api/log                                          # ops log
 POST /api/poll                                         # poll all systems now

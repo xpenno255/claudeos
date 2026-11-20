@@ -17,6 +17,7 @@ async function call(method, path, body) {
 
 export const api = {
   overview:        ()            => call("GET",    "/api/overview"),
+  attention:       ()            => call("GET",    "/api/attention"),
   history:         ()            => call("GET",    "/api/history"),
   log:             ()            => call("GET",    "/api/log"),
   systems:         ()            => call("GET",    "/api/systems"),

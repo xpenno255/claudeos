@@ -149,6 +149,18 @@ a.rail-sys:hover .sys-name { color: var(--amber); }
 .rail-poll .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-3); }
 .rail-poll.live .dot { background: var(--good); box-shadow: 0 0 8px var(--good); animation: blink 2s infinite; }
 @keyframes blink { 50% { opacity: .35; } }
+.rail-age { font-size: 9.5px; letter-spacing: .2em; color: var(--ink-3); margin-top: 2px;
+  font-variant-numeric: tabular-nums; }
+
+/* The server stopped answering: what the rail shows is a memory, so it stops
+   glowing like a live instrument (#75). */
+body.server-stale .rail-poll { color: var(--warning); }
+body.server-stale .rail-age { color: var(--warning); }
+body.server-stale .rail-sys { opacity: .4; }
+body.server-stale .rail-sys .led { animation: none; box-shadow: none; }
+/* `hidden` loses to .pill's display, so it is restated */
+.stale-flag[hidden] { display: none; }
+.stage-head-right { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
 
 /* ── stage ─────────────────────────────────────────────────────── */
 
@@ -247,6 +259,65 @@ a.rail-sys:hover .sys-name { color: var(--amber); }
 .tile-spark { margin-top: 10px; height: 40px; }
 .tile-spark svg { display: block; width: 100%; height: 40px; }
 .tile-unconfigured .tile-big { color: var(--ink-3); }
+/* answering, with something on the attention strip */
+.tile-warn { border-color: rgba(250,178,25,.38); }
+.tile-warn::before, .tile-warn::after { border-color: var(--warning); }
+.tile-flag { font-size: 10px; letter-spacing: .12em; color: var(--warning); white-space: nowrap; }
+
+/* ── needs attention strip (#75) ───────────────────────────────── */
+
+.attn { margin-bottom: 14px; padding: 12px 16px; }
+.attn-crit { border-color: rgba(208,59,59,.4); }
+.attn-crit::before, .attn-crit::after { border-color: var(--critical); }
+.attn-warn { border-color: rgba(250,178,25,.38); }
+.attn-warn::before, .attn-warn::after { border-color: var(--warning); }
+.attn .panel-title { margin-bottom: 6px; }
+.attn-row {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 5px 6px; font-size: 12px; color: var(--ink-2);
+  border-left: 2px solid transparent; text-decoration: none;
+}
+a.attn-row:hover { background: rgba(126,178,209,0.05); color: var(--ink); }
+.attn-glyph { flex: none; width: 1.1em; text-align: center; }
+.attn-sev {
+  flex: none; font-family: var(--font-display); font-size: 9.5px; font-weight: 600;
+  letter-spacing: .16em; min-width: 3.4em;
+}
+.attn-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.attn-text b { color: var(--warning); font-weight: 600; letter-spacing: .08em; }
+.attn-go { flex: none; color: var(--ink-3); }
+a.attn-row:hover .attn-go { color: var(--amber); }
+.attn-row.critical { border-left-color: var(--critical); }
+.attn-row.critical .attn-glyph, .attn-row.critical .attn-sev { color: var(--critical); }
+.attn-row.critical .attn-text { color: var(--ink); }
+.attn-row.warn { border-left-color: var(--warning); }
+.attn-row.warn .attn-glyph, .attn-row.warn .attn-sev { color: var(--warning); }
+.attn-row.info .attn-glyph, .attn-row.info .attn-sev { color: var(--cyan); }
+.attn-row.info .attn-text { color: var(--ink-3); }
+.attn-clear-line {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  font-size: 12px; color: var(--ink-2); padding: 2px 6px;
+}
+.attn-clear-line .attn-glyph { color: var(--good); }
+.attn-foot { font-size: 10px; color: var(--ink-3); letter-spacing: .08em; margin-top: 6px; padding: 0 6px;
+  font-variant-numeric: tabular-nums; }
+
+/* the last render, kept but no longer vouched for */
+.is-stale { opacity: .45; filter: grayscale(.7); }
+.is-stale .led { animation: none; box-shadow: none; }
+
+/* "we could not look" — never the same panel as "there is nothing here" */
+.load-fail {
+  text-align: center; padding: 36px 24px;
+  border-color: rgba(250,178,25,.38);
+}
+.load-fail::before, .load-fail::after { border-color: var(--warning); }
+.load-fail .glyph { font-size: 30px; color: var(--warning); }
+.load-fail h2 {
+  font-family: var(--font-display); letter-spacing: .2em; font-weight: 600;
+  margin: 10px 0 8px; font-size: 18px; color: var(--warning);
+}
+.load-fail p { color: var(--ink-2); max-width: 520px; margin: 0 auto 18px; overflow-wrap: anywhere; }
 
 .dash-grid {
   display: grid; gap: 14px; margin-top: 14px;
