@@ -87,7 +87,8 @@ Configuration env vars: `CLAUDEOS_DATA` (state dir, `/data` in the image),
 `CLAUDEOS_HOST` (bind, `0.0.0.0` in the image), `CLAUDEOS_PORT` (8321), `TZ`,
 and `CLAUDEOS_ALLOWED_HOSTS`. That last one is a comma-separated list of real
 domains you reach ClaudeOS by, such as a reverse proxy's name. IP addresses,
-single-label names (`docker`) and `.lan`, `.local`, `.home.arpa` and
+single-label names (`docker`) and `.lan`, `.local`, `.home`, `.home.arpa`,
+`.localdomain` and
 `.internal` names work without it. Anything else is refused (see Security
 model).
 

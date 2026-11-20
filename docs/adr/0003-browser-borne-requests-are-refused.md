@@ -24,7 +24,8 @@ to drive the Ops Chat approval flow end to end.
 (`app/requestguard.py`). Don't add authentication.
 
 - `Host` must be a name an outsider cannot own: an IP literal, a single-label
-  name, a reserved private suffix (`.local`, `.lan`, `.home.arpa`, `.internal`,
+  name, a reserved private suffix (`.local`, `.lan`, `.home`, `.home.arpa`,
+  `.localdomain`, `.internal`,
   `.localhost`), or a domain listed in `CLAUDEOS_ALLOWED_HOSTS`.
 - A non-GET request carrying an `Origin` (or `Sec-Fetch-Site: cross-site`) must
   match `Host`. `Origin: null` is refused.
