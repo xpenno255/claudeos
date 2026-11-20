@@ -232,13 +232,16 @@ class RetryTest(_NotifyFixture):
     def test_a_blip_is_retried_and_the_alert_arrives(self):
         calls = []
 
-        def flaky(*a):
-            calls.append(1)
+        def flaky(s, title, message, *a):
+            calls.append(message)
             if len(calls) == 1:
                 raise ConnectionError("timeout reaching https://api.telegram.org/bot•••/sendMessage")
         self.fan_out(flaky)
         self.assertEqual(len(calls), 2, "the failed channel must be tried again")
         self.assertEqual(self.waits, [self.notify.RETRY_DELAYS_S[0]])
+        self.assertIn("delivered late", calls[1],
+                      "a retry can arrive after a newer alert and must say when it was raised")
+        self.assertNotIn("delivered late", calls[0])
         self.assertTrue(any("sent via Webhook" in m for m in self.log_lines()))
         self.assertFalse(any("was not delivered" in m for m in self.log_lines()))
 

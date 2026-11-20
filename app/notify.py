@@ -82,7 +82,11 @@ def _send_webhook(s, title, message, priority, tags):
 
 def _send_telegram(s, title, message, priority, tags):
     request("POST", f"https://api.telegram.org/bot{s['bot_token']}/sendMessage",
-            json_body={"chat_id": s["chat_id"], "text": f"{title}\n{message}"},
+            # Previews off: alert text can carry a URL from an unauthenticated
+            # source (a heartbeat's own report, model prose), and a preview has
+            # Telegram's servers fetch it with no click (ADR-0002, amended).
+            json_body={"chat_id": s["chat_id"], "text": f"{title}\n{message}",
+                       "link_preview_options": {"is_disabled": True}},
             verify_tls=True)
 
 
@@ -199,16 +203,23 @@ def _fan_out(title, message, priority, tags, *, delays=(), sleep=time.sleep):
         return
     sent, pending = [], list(live)
     attempts = 0
+    raised = time.localtime()
     for wait in (0, *delays):
         if not pending:
             break
         if wait:
             sleep(wait)
         attempts += 1
+        # A retry can land after a newer alert about the same thing (a DOWN
+        # arriving after its "recovered"), and notify cannot tell which alerts
+        # concern the same thing. So a late copy says when it was raised, and the
+        # owner can put the messages back in order.
+        body = message if attempts == 1 else (
+            f"{message}\n(raised {time.strftime('%H:%M', raised)}, delivered late)")
         failing = []
         for cid in pending:
             try:
-                _SENDERS[cid](_channel_settings(cid), title, message, priority, tags)
+                _SENDERS[cid](_channel_settings(cid), title, body, priority, tags)
                 sent.append(_label(cid))
             except Exception as e:  # noqa: BLE001 — one dead channel must not stop the rest
                 failing.append(cid)

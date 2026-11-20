@@ -447,13 +447,15 @@ def _why(st: dict, now: float) -> str:
     already done the diagnosis). The alert used to say only "is failed", and the
     reason sat on the Backups tab until someone went looking.
 
-    `detail` comes from the unauthenticated ping route. Telegram is sent as
-    plain text and `record_run` caps it at 500 characters, so it is quoted
-    as-is.
+    `detail` comes from the unauthenticated ping route, so it is untrusted text
+    on its way to the owner's phone (ADR-0002, amended). It is labelled as the
+    job's own report and never presented as ClaudeOS's finding. `record_run`
+    caps it at 500 characters, and Telegram goes out as plain text with link
+    previews off, so a URL in it is never fetched on its own.
     """
     status = st.get("status")
     if status == "failed" and st.get("detail"):
-        return f": {st['detail']}"
+        return f'. The job reported: "{st["detail"]}"'
     if status == "anomaly" and st.get("anomaly_detail"):
         return f": {st['anomaly_detail']}"
     if status == "stale" and st.get("last_ok") is not None:
