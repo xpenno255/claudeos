@@ -438,7 +438,32 @@ def _claim_transition(job_id: str, status: str):
         return prev
 
 
-def _alert_on_transition(job: dict, status: str) -> None:
+def _why(st: dict, now: float) -> str:
+    """The reason half of an alert, from the evaluated status.
+
+    Since there is exactly one alert per transition, it has to say why, or it
+    can't be acted on. A failed job's own `detail` is the most specific evidence
+    the app will ever hold (a heartbeat that says "libasound.so.2 not found" has
+    already done the diagnosis). The alert used to say only "is failed", and the
+    reason sat on the Backups tab until someone went looking.
+
+    `detail` comes from the unauthenticated ping route, so it is untrusted text
+    on its way to the owner's phone (ADR-0002, amended). It is labelled as the
+    job's own report and never presented as ClaudeOS's finding. `record_run`
+    caps it at 500 characters, and Telegram goes out as plain text with link
+    previews off, so a URL in it is never fetched on its own.
+    """
+    status = st.get("status")
+    if status == "failed" and st.get("detail"):
+        return f'. The job reported: "{st["detail"]}"'
+    if status == "anomaly" and st.get("anomaly_detail"):
+        return f": {st['anomaly_detail']}"
+    if status == "stale" and st.get("last_ok") is not None:
+        return f": no successful run for {(now - st['last_ok']) / 3600:.1f}h"
+    return "."
+
+
+def _alert_on_transition(job: dict, status: str, st: dict | None = None) -> None:
     """Alert on a change of state, never on the state itself.
 
     A job that has been dead for a week must not notify every half hour.
@@ -452,7 +477,8 @@ def _alert_on_transition(job: dict, status: str) -> None:
     if status in _ALERT:
         priority, tags = _ALERT[status]
         notify.send(f"Backup {status}: {name}",
-                    f"{name} is {status}.", priority=priority, tags=tags)
+                    f"{name} is {status}{_why(st or {}, time.time())}",
+                    priority=priority, tags=tags)
     elif prev in _ALERT and status == "ok":
         notify.send(f"Backup recovered: {name}", f"{name} is ok again.",
                     priority="default", tags=["white_check_mark"])
@@ -646,7 +672,7 @@ def sweep() -> None:
     for st in evaluate(list_jobs()):
         job = get_job(st["id"])
         if job and not job.get("muted"):
-            _alert_on_transition(job, st["status"])
+            _alert_on_transition(job, st["status"], st)
 
 
 def _discovery_error(err=None, *, clear=False):

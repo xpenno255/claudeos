@@ -35,10 +35,14 @@ expensive*. Eight modules clear it.
   `_usage` shape, and would under-report the app's priciest call by an order of
   magnitude while looking plausible. One test exists only to assert the two
   constants differ, because every other test passes if they don't.
-- `app/notify.py` — the zero-channel path only. With nothing configured, every
-  alert the app raised was discarded and *nothing recorded that it happened*
+- `app/notify.py` — the zero-channel path, and retrying a failed channel. With
+  nothing configured, every alert the app raised was discarded and *nothing recorded that it happened*
   (#41), so a failing disk's `urgent` warning spent its whole window in silence.
   The gap is recorded before any sender is reached, so this needs no network.
+  Since 2026-11-20 it also covers retrying a channel that *fails*. Every caller
+  latches its transition before sending, so one Telegram timeout used to lose an
+  alert for good, and the only trace was an ops-log line. Senders and sleeps are
+  substituted.
 - `app/httpclient.py` — URL scrubbing only. Telegram carries its bot token in
   the URL path, so every error built from that URL leaked it to the browser, to
   `data/opslog.jsonl` and — via `recent_warnings` — to the Anthropic API (#45).

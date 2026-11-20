@@ -71,3 +71,28 @@ The token is defended in depth rather than by authentication:
   exemption**, not an accidental one — a cron job still will not have a session.
 - The decision is scoped to *this* route. It is not a precedent for unauthenticated
   writes generally, and a second one should be argued on its own terms.
+
+## Amendment (2026-11-20): a ping's `detail` now reaches the owner's phone
+
+When this was decided, "the blast radius is one job's history" was true. It
+stopped being true when failed-backup alerts began quoting the job's own
+`detail`. That quote is what made the orca-hub heartbeat actionable: "libasound.so.2
+not found" in the alert rather than only on the Backups tab. But it means a
+token holder can put up to 500 characters of their own text in a push
+notification. And because `POST /api/backups` is as unauthenticated as
+everything else, *anyone on the LAN can mint a token*. So the real barrier is
+LAN reach, not the token.
+
+Accepted, with these limits:
+
+- the quote is labelled as the job's own report (`The job reported: "…"`) and
+  never presented as ClaudeOS's finding
+- it stays capped at 500 characters (`record_run`)
+- Telegram is sent as plain text with **link previews off**, so a URL in a
+  quote is never fetched by Telegram's servers without a click
+
+`detail` already reached the weekly report prompt before this change. That path
+is unchanged and is covered by the same prompt-injection reasoning as the rest of
+the report's lab-sourced text. If ClaudeOS gains authentication, job creation
+must be behind it. That would restore the token as the real barrier, and with it
+the original blast radius.

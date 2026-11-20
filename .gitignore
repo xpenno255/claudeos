@@ -1,8 +1,14 @@
-# runtime state: master key, encrypted config, ops log — never commit
-data/
+# runtime state: master key, encrypted config, ops log — never commit.
+# No trailing slash: orca.yaml shares `data` into each worktree as a symlink,
+# and `data/` matches only a directory, so the link showed as untracked and a
+# `git add -A` would have committed it.
+/data
 __pycache__/
 *.pyc
 .venv/
 
 # agent worktrees and local agent state
 .claude/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
