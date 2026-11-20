@@ -380,7 +380,7 @@ td .actions { display: flex; gap: 6px; justify-content: flex-end; }
 
 /* ── setup forms ───────────────────────────────────────────────── */
 
-.setup-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; }
+.setup-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); gap: 16px; }
 .setup-card .sys-tag {
   width: 10px; height: 10px; flex: none;
 }
@@ -505,9 +505,14 @@ td .actions { display: flex; gap: 6px; justify-content: flex-end; }
   body { grid-template-columns: 1fr; }
   .rail { position: static; height: auto; flex-direction: row; align-items: center; flex-wrap: wrap; padding: 12px; }
   .rail-systems, .rail-foot { display: none; }
-  .nav { flex-direction: row; margin: 0; }
+  /* wrap, or the nav sets the page's min width: 640px at a 390px viewport,
+     and the phone zooms everything out to ~61% (#74) */
+  .nav { flex-direction: row; flex-wrap: wrap; margin: 0; min-width: 0; }
   .nav a { border-left: none; border-bottom: 2px solid transparent; padding: 8px 12px; }
   .nav a.active { border-bottom-color: var(--amber); }
+  body > * { min-width: 0; }
+  .chat-shell { flex-direction: column-reverse; }
+  .chat-hist { width: 100%; max-height: 180px; }
 }
 
 /* ── ops chat (MISSION LOG) ─────────────────────────────────────── */
