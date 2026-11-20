@@ -17,7 +17,7 @@ flag is what guarantees it rather than relying on import order (#66).
 
 Standard library only — no pytest, no dev dependency. Coverage is **deliberately
 narrow**, and the bar is one thing: failure modes that are *silent and
-expensive*. Nine modules clear it.
+expensive*. Ten modules clear it.
 
 - `app/labissues.py` (with `app/triagelog.py`) — takes its GitHub caller, its
   analysis run and its tracker writes as arguments, so re-triage loops and
