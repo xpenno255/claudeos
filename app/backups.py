@@ -502,14 +502,16 @@ def _alert_on_transition(job: dict, status: str, st: dict | None = None) -> None
     if prev is _NO_CHANGE:
         return
     name = job.get("name") or job["id"]
+    # Keyed by job, so "failed" straight after "recovered" is never muted.
+    key = f"backup:{job['id']}"
     if status in _ALERT:
         priority, tags = _ALERT[status]
         notify.send(f"Backup {status}: {name}",
                     f"{name} is {status}{_why(st or {}, time.time())}",
-                    priority=priority, tags=tags)
+                    priority=priority, tags=tags, key=key)
     elif prev in _ALERT and status == "ok":
         notify.send(f"Backup recovered: {name}", f"{name} is ok again.",
-                    priority="default", tags=["white_check_mark"])
+                    priority="default", tags=["white_check_mark"], key=key)
 
 
 # -------------------------------------------------------------------- sweep

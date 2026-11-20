@@ -24,7 +24,7 @@ import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
-from . import notify, oplog, sweeper
+from . import alertstate, notify, oplog, sweeper
 from .httpclient import request
 from .store import DATA_DIR
 
@@ -124,6 +124,8 @@ def delete(mid: str) -> None:
         _save([m for m in mons if m["id"] != mid])
         _state.pop(mid, None)
         _history.pop(mid, None)
+    # A deleted monitor owes nobody a recovery.
+    alertstate.claim("monitor", mid, None)
 
 
 def list_monitors() -> list:
@@ -180,30 +182,35 @@ def _probe(mon: dict) -> float:
 def _record(mon: dict, ok: bool, ms: float | None, error: str | None) -> None:
     mid, now = mon["id"], time.time()
     with _lock:
-        st = _state.get(mid) or {"ok": None, "since": now, "fails": 0, "alerted": False}
+        st = _state.get(mid) or {"ok": None, "since": now, "fails": 0}
         if st["ok"] != ok:
             st["since"] = now  # status flipped — restart the up/down clock
         st.update(ok=ok, ms=ms, error=error, ts=now)
         st["fails"] = 0 if ok else st["fails"] + 1
-        fails, alerted = st["fails"], st["alerted"]
-        if ok and alerted:
-            st["alerted"] = False
-        elif not ok and not alerted and fails >= FAILS_TO_ALERT:
-            st["alerted"] = True
+        fails = st["fails"]
         _state[mid] = st
         _history.setdefault(mid, deque(maxlen=HISTORY_LEN)).append(
             (now, ok, round(ms, 1) if ms is not None else None))
 
-    if ok and alerted:
-        oplog.add("info", "monitor", f"{mon['name']} recovered")
-        notify.send(f"Monitor {mon['name']} recovered",
-                    f"{mon['type']} check on {mon['target']} succeeding again "
-                    f"({ms:.0f} ms)", priority="default", tags=["white_check_mark"])
-    elif not ok and not alerted and fails == FAILS_TO_ALERT:
+    # Whether a DOWN is outstanding is an `alertstate` latch, claimed atomically
+    # and kept across restarts, so a DOWN sent just before a deploy still gets
+    # its "recovered" (#73). Claimed outside `_lock`, as before: commit the state
+    # change, then send.
+    key = f"monitor:{mid}"
+    if ok:
+        if alertstate.claim("monitor", mid, None) == "down":
+            oplog.add("info", "monitor", f"{mon['name']} recovered")
+            notify.send(f"Monitor {mon['name']} recovered",
+                        f"{mon['type']} check on {mon['target']} succeeding again "
+                        f"({ms:.0f} ms)", priority="default", tags=["white_check_mark"],
+                        key=key)
+    elif (fails >= FAILS_TO_ALERT
+          and alertstate.claim("monitor", mid, "down") is not alertstate.NO_CHANGE):
         oplog.add("warn", "monitor", f"{mon['name']} is down: {error}")
         notify.send(f"Monitor {mon['name']} is DOWN",
                     f"{mon['type']} check on {mon['target']} failed "
-                    f"{fails}x: {error}", priority="high", tags=["rotating_light"])
+                    f"{fails}x: {error}", priority="high", tags=["rotating_light"],
+                    key=key)
 
 
 def check_all() -> None:

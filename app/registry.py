@@ -21,7 +21,7 @@ import threading
 import time
 import urllib.parse
 
-from . import notify, oplog, store, sweeper
+from . import alertstate, notify, oplog, store, sweeper
 from .connectors import docker
 from .httpclient import HttpError, request
 
@@ -35,7 +35,6 @@ ACCEPT = ", ".join([
 
 _lock = threading.Lock()
 _cache: dict = {"images": [], "ts": None, "error": None}
-_alerted: set = set()  # refs already announced as having an update
 
 
 def _parse_ref(ref: str):
@@ -162,15 +161,23 @@ def sweep(alert: bool = True) -> list:
     with _lock:
         _cache.update(images=images, ts=time.time(), error=None)
 
-    updates = [i for i in images if i["status"] == "update"]
-    fresh = [i["ref"] for i in updates if i["ref"] not in _alerted]
-    _alerted.intersection_update({i["ref"] for i in updates})  # forget applied ones
-    if alert and fresh:
-        _alerted.update(fresh)
+    # Which refs were already announced is an `alertstate` latch, so a restart
+    # does not announce every pending update a second time.
+    updates = [i["ref"] for i in images if i["status"] == "update"]
+    for ref in alertstate.entries("registry"):
+        if ref not in updates:
+            alertstate.claim("registry", ref, None)  # applied: forget it
+    fresh = ([ref for ref in updates
+              if alertstate.claim("registry", ref, "update") is not alertstate.NO_CHANGE]
+             if alert else [])
+    if fresh:
         oplog.add("info", "registry", f"image updates available: {', '.join(fresh)}")
+        # The subject is this set of images: two different sets can share a
+        # title ("1 container image update available") and must not mute.
         notify.send(
             f"{len(fresh)} container image update{'s' if len(fresh) > 1 else ''} available",
-            ", ".join(fresh)[:800], priority="default", tags=["package"])
+            ", ".join(fresh)[:800], priority="default", tags=["package"],
+            key="registry:" + ",".join(sorted(fresh)))
     return images
 
 
