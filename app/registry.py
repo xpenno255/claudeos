@@ -168,9 +168,12 @@ def sweep(alert: bool = True) -> list:
     if alert and fresh:
         _alerted.update(fresh)
         oplog.add("info", "registry", f"image updates available: {', '.join(fresh)}")
+        # The subject is this set of images: two different sets can share a
+        # title ("1 container image update available") and must not mute.
         notify.send(
             f"{len(fresh)} container image update{'s' if len(fresh) > 1 else ''} available",
-            ", ".join(fresh)[:800], priority="default", tags=["package"])
+            ", ".join(fresh)[:800], priority="default", tags=["package"],
+            key="registry:" + ",".join(sorted(fresh)))
     return images
 
 

@@ -198,12 +198,14 @@ def _record(mon: dict, ok: bool, ms: float | None, error: str | None) -> None:
         oplog.add("info", "monitor", f"{mon['name']} recovered")
         notify.send(f"Monitor {mon['name']} recovered",
                     f"{mon['type']} check on {mon['target']} succeeding again "
-                    f"({ms:.0f} ms)", priority="default", tags=["white_check_mark"])
+                    f"({ms:.0f} ms)", priority="default", tags=["white_check_mark"],
+                    key=f"monitor:{mid}")
     elif not ok and not alerted and fails == FAILS_TO_ALERT:
         oplog.add("warn", "monitor", f"{mon['name']} is down: {error}")
         notify.send(f"Monitor {mon['name']} is DOWN",
                     f"{mon['type']} check on {mon['target']} failed "
-                    f"{fails}x: {error}", priority="high", tags=["rotating_light"])
+                    f"{fails}x: {error}", priority="high", tags=["rotating_light"],
+                    key=f"monitor:{mid}")
 
 
 def check_all() -> None:

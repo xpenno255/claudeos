@@ -20,10 +20,18 @@ alert that got through was 31 hours earlier, and nothing showed the gap, because
 the only record was ops-log lines, and #41 already established that nobody reads
 those unprompted. Worse, every caller latches its transition *before* sending, so
 an alert lost to one blip is never raised again. Retries and a final "not
-delivered" line are tested. Nothing else in `notify.py` is, and this file is not
-an invitation to change that. No network: the gap is recorded before any sender
-is reached, and every test that needs a delivery to succeed or fail substitutes
-the sender.
+delivered" line are tested.
+
+`MuteTest` covers the third path for the same reason: the mute can lose an alert
+for good too. It muted any identical title for five minutes, so a second outage
+inside that window was dropped, and since the poller alerts only on a transition
+it was never raised again (#72). The mute now takes a subject key and drops only
+an exact repeat for that subject; `_muted` takes its clock as an argument so the
+cooldown boundary is tested without waiting.
+
+Nothing else in `notify.py` is tested, and this file is not an invitation to
+change that. No network: the gap is recorded before any sender is reached, and
+every test that needs a delivery to succeed or fail substitutes the sender.
 """
 
 import importlib
@@ -281,3 +289,60 @@ class RetryTest(_NotifyFixture):
         self.raise_alert()
         self.assertTrue(any("was not delivered" in m and "after 1 attempts" in m
                             for m in self.log_lines()))
+
+
+class MuteTest(_NotifyFixture):
+    """The mute drops exact repeats, never a change of state (#72).
+
+    It used to mute any identical title for five minutes, and the poller alerts
+    only on a transition, so a second outage inside that window was muted and
+    then never raised again. UniFi was down for 4.4 minutes on 29 Oct at 00:36
+    with no page, and the last message the owner had seen was "recovered". The
+    sender is substituted to count deliveries. The cooldown boundary is tested
+    through `_muted`, which takes the clock as an argument, so nothing waits."""
+
+    def setUp(self):
+        super().setUp()
+        self.configure_a_channel()
+        self.delivered = []
+        self.notify._SENDERS["webhook"] = lambda s, title, *a: self.delivered.append(title)
+
+    def send(self, title, key=None):
+        self.notify.send(title, "m", "high", background=False, key=key)
+
+    def test_a_change_of_state_is_never_muted(self):
+        """DOWN, recovered, DOWN again inside the cooldown: all three are news."""
+        for title in ("UniFi Network is DOWN", "UniFi Network recovered",
+                      "UniFi Network is DOWN"):
+            self.send(title, key="poller:unifi")
+        self.assertEqual(self.delivered, ["UniFi Network is DOWN", "UniFi Network recovered",
+                                          "UniFi Network is DOWN"])
+
+    def test_a_repeat_of_the_same_state_is_muted(self):
+        """What the mute is for: two threads that both read a stale latch both
+        send, and the second is an exact repeat."""
+        self.send("UniFi Network is DOWN", key="poller:unifi")
+        self.send("UniFi Network is DOWN", key="poller:unifi")
+        self.assertEqual(self.delivered, ["UniFi Network is DOWN"])
+
+    def test_subjects_do_not_mute_each_other(self):
+        """Two image sets can share a title; different subjects are different news."""
+        self.send("1 container image update available", key="registry:a:latest")
+        self.send("1 container image update available", key="registry:b:latest")
+        self.assertEqual(len(self.delivered), 2)
+
+    def test_without_a_key_an_identical_title_is_still_muted(self):
+        """Callers that pass no key keep exactly the old behaviour."""
+        self.send("ClaudeOS chat made a change")
+        self.send("ClaudeOS chat made a change")
+        self.send("Homelab health report — grade B")
+        self.assertEqual(self.delivered, ["ClaudeOS chat made a change",
+                                          "Homelab health report — grade B"])
+
+    def test_a_repeat_goes_again_once_the_cooldown_has_passed(self):
+        cooldown = self.notify.COOLDOWN_S
+        muted = self.notify._muted
+        self.assertFalse(muted("X is DOWN", "poller:x", 1000.0))
+        self.assertTrue(muted("X is DOWN", "poller:x", 1000.0 + cooldown - 1))
+        self.assertFalse(muted("X is DOWN", "poller:x", 1000.0 + cooldown),
+                         "a repeat after the cooldown is a reminder, not noise")

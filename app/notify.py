@@ -43,11 +43,10 @@ NTFY_PRIORITY = {"low": 2, "default": 3, "high": 4, "urgent": 5}
 # pushover 2 requires retry/expire params, so urgent caps at 1
 PUSHOVER_PRIORITY = {"low": -1, "default": 0, "high": 1, "urgent": 1}
 
-# identical titles are muted for this long so a flapping system can't
-# flood every channel (the poller retries every 30s)
+# An exact repeat is muted for this long (see `send` for what counts as one).
 COOLDOWN_S = 300
 _mute_lock = threading.Lock()
-_last_sent: dict = {}  # title -> ts
+_last_sent: dict = {}  # ("key", key) | ("title", title) -> (title, ts)
 
 
 def _label(cid: str) -> str:
@@ -160,17 +159,34 @@ def state() -> dict:
 
 
 def send(title: str, message: str, priority: str = "default",
-         tags: list | None = None, background: bool = True) -> None:
+         tags: list | None = None, background: bool = True,
+         key: str | None = None) -> None:
     """Fan an alert out to every enabled channel. Never raises.
 
     Delivery runs on a daemon thread by default so callers (the poller,
     request handlers) never block on a slow push service.
+
+    **The mute.** An exact repeat within `COOLDOWN_S` is dropped here, and that
+    is what deduplicates the latch-then-notify callers. Each of them records its
+    transition and then sends, and wherever two threads can read the latch before
+    either writes it, both send: labissues' credential latch is a plain global,
+    and any caller can be reached by a sweeper and a route at once. The second
+    send is an exact repeat, and this is the last thing that stops it.
+
+    **What counts as a repeat depends on `key`**, the subject the alert is about
+    (`"poller:homeassistant"`, `"smart:pve:/dev/sda"`):
+
+    * With a key, the same title for the same key is muted, and nothing else is.
+      A different title for that key is a change of state and is never muted, so
+      "X is DOWN" after "X recovered" always goes through. A second outage inside
+      five minutes used to be muted, and since the poller alerts only on a
+      transition it was never raised again: the last message the owner had was
+      "recovered", for a system that was down (#72).
+    * Without a key, an identical title is muted, as it always was. A caller
+      whose titles carry their own identity (a lab issue's number) needs no more.
     """
-    now = time.time()
-    with _mute_lock:
-        if now - _last_sent.get(title, 0) < COOLDOWN_S:
-            return
-        _last_sent[title] = now
+    if _muted(title, key, time.time()):
+        return
     if background:
         threading.Thread(target=_fan_out, args=(title, message, priority, tags),
                          kwargs={"delays": RETRY_DELAYS_S},
@@ -178,6 +194,21 @@ def send(title: str, message: str, priority: str = "default",
     else:
         # A caller that waits on delivery must not wait out the retries.
         _fan_out(title, message, priority, tags, delays=())
+
+
+def _muted(title: str, key: str | None, now: float) -> bool:
+    """True if this repeats an alert sent within `COOLDOWN_S`; recorded if not."""
+    slot = ("key", key) if key is not None else ("title", title)
+    with _mute_lock:
+        # Expired entries go, so keys and titles cannot pile up for the life of
+        # the process. Whatever is left is by definition inside the cooldown.
+        for s in [s for s, (_, ts) in _last_sent.items() if now - ts >= COOLDOWN_S]:
+            del _last_sent[s]
+        last = _last_sent.get(slot)
+        if last is not None and last[0] == title:
+            return True
+        _last_sent[slot] = (title, now)
+        return False
 
 
 # Waits before each re-attempt at a channel that failed, in seconds (about 5
@@ -281,8 +312,8 @@ def _write_gap(d: dict) -> None:
 def _record_drop(title: str, priority: str) -> None:
     """Count one alert that had nowhere to go.
 
-    `send` has already muted an identical title for `COOLDOWN_S` before this is
-    reached, so a flapping system counts once per cooldown rather than once per
+    `send` has already muted an exact repeat for `COOLDOWN_S` before this is
+    reached, so a repeated alert counts once per cooldown rather than once per
     poll — the same shape delivery would have had.
     """
     with _gap_lock:

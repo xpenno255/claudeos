@@ -154,12 +154,12 @@ def sweep(alert: bool = True) -> list:
             notify.send(f"Disk {d['status'].upper()}: {d['devpath']} on {d['node']}",
                         f"{d['model']}: {'; '.join(d['issues'])}",
                         priority="urgent" if d["status"] == "fail" else "high",
-                        tags=["floppy_disk"])
+                        tags=["floppy_disk"], key=f"smart:{key}")
         else:
             oplog.add("info", "smart", f"disk recovered: {label}")
             notify.send(f"Disk recovered: {d['devpath']} on {d['node']}",
                         f"{d['model']}: SMART status back to ok",
-                        priority="default", tags=["white_check_mark"])
+                        priority="default", tags=["white_check_mark"], key=f"smart:{key}")
     return disks
 
 

@@ -218,9 +218,11 @@ class PollerTest(unittest.TestCase):
         """The other half of the owner's rule: off when it is supposed to be on
         is a possible fault, and the window must not have dulled that."""
         self.poll_at(self.EXPIRED, alive=True)
+        self.poll_at(self.EXPIRED)
+        self.assertEqual(self.sent, [], "one failed poll is a blip, not an outage (#72)")
         st = self.poll_at(self.EXPIRED)
         self.assertFalse(st["ok"])
-        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(len(self.sent), 1, "two failed polls, as for any outage")
         self.assertEqual(self.sent[0][2].get("priority"), "high")
 
     def test_with_no_window_the_ordinary_down_path_is_unchanged(self):

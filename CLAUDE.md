@@ -42,7 +42,10 @@ expensive*. Eight modules clear it.
   Since 2026-11-20 it also covers retrying a channel that *fails*. Every caller
   latches its transition before sending, so one Telegram timeout used to lose an
   alert for good, and the only trace was an ops-log line. Senders and sleeps are
-  substituted.
+  substituted. And the mute: it drops exact repeats, never a change of state
+  (#72). Muting any identical title for five minutes swallowed a second outage
+  inside that window, which the poller then never raised again, so the last
+  thing the owner saw was "recovered". The cooldown takes its clock as an argument.
 - `app/httpclient.py` — URL scrubbing only. Telegram carries its bot token in
   the URL path, so every error built from that URL leaked it to the browser, to
   `data/opslog.jsonl` and — via `recent_warnings` — to the Anthropic API (#45).
