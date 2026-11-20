@@ -5,6 +5,7 @@
 import { api } from "../api.js";
 import { el } from "../util.js";
 import { BY_ID } from "../meta.js";
+import { confirmAction } from "../guard.js";
 
 const FORMS = [
   {
@@ -335,13 +336,15 @@ function card(form, cfg, status, toast, models) {
     });
   }
 
-  const removeBtn = el("button", { class: "btn btn-mini btn-danger" }, "UNLINK");
-  let armed = false;
+  const removeBtn = el("button", { class: "btn btn-mini btn-danger", "aria-haspopup": "dialog" }, "UNLINK");
   removeBtn.addEventListener("click", async () => {
-    if (!armed) { armed = true; removeBtn.textContent = "CONFIRM UNLINK?"; setTimeout(() => { armed = false; removeBtn.textContent = "UNLINK"; }, 3000); return; }
-    await api.deleteSystem(form.id);
-    toast(`${meta.label} unlinked`, "ok", "SETUP");
-    location.reload();
+    if (!await confirmAction(removeBtn, { action: "UNLINK", target: meta.label,
+      detail: "Its saved connection details and stored secrets are removed." })) return;
+    try {
+      await api.deleteSystem(form.id);
+      toast(`${meta.label} unlinked`, "ok", "SETUP");
+      location.reload();
+    } catch (e) { toast(String(e.message || e), "err", "UNLINK FAILED"); }
   });
 
   return el("div", { class: "panel setup-card" },

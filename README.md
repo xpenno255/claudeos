@@ -56,7 +56,8 @@ The key is encrypted at rest like every other secret.
   e.g. `- /home/you:/scan/home:ro` — one SCAN button per mount.
 - **ZHA health** uses the HA websocket API — works with the same token.
 
-Disruptive actions require a second confirming click, and everything ClaudeOS
+Disruptive actions ask first, in one guarded confirm that names the action and
+its target (hard power actions sit behind a "⋯" menu), and everything ClaudeOS
 does is written to the **ops log** (`data/opslog.jsonl`) — the audit trail for
 you or any agent driving the API.
 

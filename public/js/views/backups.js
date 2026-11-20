@@ -7,6 +7,7 @@
 import { api } from "../api.js";
 import { el, fmtBytes, timeAgo, couldNotLoad } from "../util.js";
 import { sparkline } from "../charts.js";
+import { confirmAction } from "../guard.js";
 
 // `never` deliberately reads as a warning, not a neutral blank. A job added and
 // never wired up is the likeliest silent failure this tab exists to catch, and
@@ -128,9 +129,12 @@ function row(j, toast) {
     // Regenerate rather than reveal: the list payload deliberately carries no
     // token, so the only way to see one again is to mint a new one — which
     // also means a leaked token is one click from being dead.
-    const tokBtn = el("button", { class: "btn btn-ghost" }, "NEW TOKEN");
+    const tokBtn = el("button", { class: "btn btn-ghost", "aria-haspopup": "dialog" }, "NEW TOKEN");
     tokBtn.addEventListener("click", async () => {
-      if (!confirm(`Regenerate the token for "${j.name}"? The old ping URL stops working.`)) return;
+      // the guard, not confirm(): the artifact viewer and some browsers
+      // suppress native dialogs, and this one guards a live credential (#76)
+      if (!await confirmAction(tokBtn, { action: "NEW TOKEN", target: `for ${j.name}`,
+        detail: "The old ping URL stops working; the backup script needs the new one." })) return;
       try {
         const { job } = await api.backupToken(j.id);
         const url = `${location.origin}/api/backups/${job.token}/ping`;
@@ -140,9 +144,10 @@ function row(j, toast) {
     });
     actions.append(tokBtn);
 
-    const delBtn = el("button", { class: "btn btn-ghost" }, "DELETE");
+    const delBtn = el("button", { class: "btn btn-danger", "aria-haspopup": "dialog" }, "DELETE");
     delBtn.addEventListener("click", async () => {
-      if (!confirm(`Delete backup job "${j.name}"? Its history goes too.`)) return;
+      if (!await confirmAction(delBtn, { action: "DELETE", target: j.name,
+        detail: "Its history goes too." })) return;
       try {
         await api.backupDelete(j.id);
         location.reload();
