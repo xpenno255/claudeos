@@ -17,7 +17,7 @@ flag is what guarantees it rather than relying on import order (#66).
 
 Standard library only — no pytest, no dev dependency. Coverage is **deliberately
 narrow**, and the bar is one thing: failure modes that are *silent and
-expensive*. Eight modules clear it.
+expensive*. Nine modules clear it.
 
 - `app/labissues.py` (with `app/triagelog.py`) — takes its GitHub caller, its
   analysis run and its tracker writes as arguments, so re-triage loops and
@@ -46,6 +46,15 @@ expensive*. Eight modules clear it.
   (#72). Muting any identical title for five minutes swallowed a second outage
   inside that window, which the poller then never raised again, so the last
   thing the owner saw was "recovered". The cooldown takes its clock as an argument.
+- `app/alertstate.py` (with the poller and SMART branches that read it) — alert
+  latches across a restart, and the poller's two-poll debounce. Every deploy
+  used to forget what had been alerted (#73): a system down at boot never
+  alerted, a DOWN sent just before a restart never got its "recovered", and a
+  disk already failing at boot was swept forever and alerted zero times, at the
+  priority (`urgent`) whose whole point is a short window. A restart is a module
+  reload over the same `CLAUDEOS_DATA`, and Proxmox, the connectors and the
+  notifier are substituted. The debounce is beside it (#72) because one failed
+  poll paging `high` is how an owner learns to ignore "is DOWN".
 - `app/httpclient.py` — URL scrubbing only. Telegram carries its bot token in
   the URL path, so every error built from that URL leaked it to the browser, to
   `data/opslog.jsonl` and — via `recent_warnings` — to the Anthropic API (#45).

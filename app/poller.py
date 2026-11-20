@@ -10,14 +10,17 @@ hammering the lab.
 knows no summary shapes at all, and a new system needs nothing here.
 
 A system alerts DOWN after FAILS_TO_ALERT consecutive failed polls and
-"recovered" on the first success after that.
+"recovered" on the first success after that. Whether a DOWN is outstanding is
+an `alertstate` latch rather than anything held here, so it survives a restart
+(#73): a system down at boot alerts like any other, and a DOWN sent just before
+a deploy still gets its "recovered" afterwards.
 """
 
 import threading
 import time
 from collections import deque
 
-from . import notify, offhours, oplog, store, sweeper
+from . import alertstate, notify, offhours, oplog, store, sweeper
 from .connectors import CONNECTORS
 
 POLL_INTERVAL = 30
@@ -31,7 +34,7 @@ HISTORY_LEN = 120  # ~1 hour at 30s
 FAILS_TO_ALERT = 2
 
 _lock = threading.Lock()
-_latest: dict = {}    # system_id -> {"ok", "ts", "fails", "alerted", "data" | "error"}
+_latest: dict = {}    # system_id -> {"ok", "ts", "fails", "data" | "error"}
 _history: dict = {}   # system_id -> {metric: deque[(ts, value)]}
 
 
@@ -56,24 +59,19 @@ def poll_once() -> None:
         # distinguishes "never seen / not configured" from "asleep on schedule",
         # which both carry ok=None but mean opposite things when it ends
         was_scheduled = bool(prev.get("scheduled_off"))
-        # Seen up, or asleep on schedule, since ClaudeOS started. Only then can
-        # it go DOWN, so a restart never re-fires "down" for a system already
-        # offline.
-        armed = bool(prev.get("armed"))
-        alerted = bool(prev.get("alerted"))
         label = store.SYSTEM_LABELS.get(system_id, system_id)
         key = f"poller:{system_id}"
         try:
             s = mod.summary(settings)
             with _lock:
-                _latest[system_id] = {"ok": True, "ts": time.time(), "fails": 0,
-                                      "armed": True, "alerted": False, "data": s}
+                _latest[system_id] = {"ok": True, "ts": time.time(), "fails": 0, "data": s}
                 _record(system_id, mod.metrics(s))
             if was_ok is False:
                 oplog.add("info", system_id, "connection recovered")
-            # Recovery is owed only if a DOWN went out. A single failed poll
-            # never alerted, so it recovers silently.
-            if alerted:
+            # Recovery is owed only if a DOWN went out, and the latch is what
+            # knows that, including a DOWN sent by the process before a restart.
+            # A single failed poll never alerted, so it recovers silently.
+            if alertstate.claim("poller", system_id, None) == "down":
                 notify.send(f"{label} recovered", "polling succeeded again",
                             priority="default", tags=["white_check_mark"], key=key)
         except Exception as e:  # noqa: BLE001 — any connector failure = offline
@@ -87,24 +85,27 @@ def poll_once() -> None:
                 # rather than as ok=False: it is neither healthy nor broken, and
                 # calling it broken every night is how an alert gets ignored.
                 # Nothing alerts from here, and a system that wakes on time owes
-                # no "recovered", because no DOWN went out for it.
+                # no "recovered", because no DOWN was latched for it.
                 with _lock:
                     _latest[system_id] = {"ok": None, "ts": time.time(),
                                           "scheduled_off": True, "fails": fails,
-                                          "armed": True, "alerted": alerted,
                                           "error": offhours.reason(sched)}
                 # once per descent into the window, not once per 30s poll
                 if not was_scheduled:
                     oplog.add("info", system_id, offhours.reason(sched))
                 continue
-            fire = armed and not alerted and fails >= FAILS_TO_ALERT
             with _lock:
                 _latest[system_id] = {"ok": False, "ts": time.time(), "fails": fails,
-                                      "armed": armed, "alerted": alerted or fire,
                                       "error": str(e)}
             if was_ok is not False:
                 oplog.add("warn", system_id, f"poll failed: {e}")
-            if not fire:
+            if fails < FAILS_TO_ALERT:
+                continue
+            # The latch decides, not `was_ok`. A system already down when
+            # ClaudeOS starts has no earlier "up" to fall from, and used to never
+            # alert at all (#73). One whose DOWN is still latched from before a
+            # restart must not be announced twice.
+            if alertstate.claim("poller", system_id, "down") is alertstate.NO_CHANGE:
                 continue
             detail = str(e)
             if was_scheduled:

@@ -206,6 +206,7 @@ app/
   httpclient.py         outbound HTTP w/ self-signed-TLS support
   poller.py             30s background poll + metric ring buffers
   oplog.py              audit log (memory + data/opslog.jsonl)
+  alertstate.py         alert latches that survive a restart (data/alerts.json)
   connectors/           unifi · proxmox · docker · homeassistant · synology
 public/                 no-build frontend (ES modules)
 data/                   master key, encrypted config, ops log (created at runtime)

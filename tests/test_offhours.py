@@ -15,11 +15,14 @@ invisible — the alerts simply stop happening at slightly the wrong times, and
 nothing looks broken.
 
 `PollerTest` covers the branch that acts on it, because a correct window nobody
-consults is the bug still shipping. It substitutes the connector, the clock and
-the notifier, so it touches no network and sends nothing.
+consults is the bug still shipping. It substitutes the connector, the clock,
+the notifier and the data directory the DOWN latch persists to, so it touches
+no network, sends nothing, and no test inherits another's outage.
 """
 
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -134,7 +137,12 @@ class PollerTest(unittest.TestCase):
         _Connector.alive = False
         self.sent = []
         self.logged = []
+        # The DOWN latch is persisted (#73), so each test gets its own directory
+        # or one test's outage becomes the next one's "recovered".
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.patches = [
+            mock.patch.object(poller.store, "DATA_DIR", self.tmp),
             mock.patch.object(poller, "CONNECTORS", {"synology": _DeadConnector}),
             mock.patch.object(poller.store, "get_system",
                               lambda sid, reveal_secrets=False: dict(OVERNIGHT, host="h")),
@@ -219,17 +227,29 @@ class PollerTest(unittest.TestCase):
         is a possible fault, and the window must not have dulled that."""
         self.poll_at(self.EXPIRED, alive=True)
         self.poll_at(self.EXPIRED)
-        self.assertEqual(self.sent, [], "one failed poll is a blip, not an outage (#72)")
         st = self.poll_at(self.EXPIRED)
         self.assertFalse(st["ok"])
         self.assertEqual(len(self.sent), 1, "two failed polls, as for any outage")
         self.assertEqual(self.sent[0][2].get("priority"), "high")
 
     def test_with_no_window_the_ordinary_down_path_is_unchanged(self):
+        """No window is the ordinary path: one failed poll is a blip, the second
+        is an outage (#72), even for a system that was already down when
+        ClaudeOS started and so was never seen up (#73)."""
         st = self.poll_at(None)
         self.assertFalse(st["ok"])
-        self.assertEqual(len(self.sent), 0,
-                         "first sight of a dead system is not a True->False transition")
+        self.assertEqual(self.sent, [], "one failed poll is not an outage")
+        self.poll_at(None)
+        self.assertEqual(len(self.sent), 1)
+        self.assertNotIn("did not come back", self.sent[0][1])
+
+    def test_inside_the_window_a_system_down_at_boot_stays_silent(self):
+        """A restart inside the window starts with no latch and no history. The
+        latch that makes a system down at boot alert (#73) must not override the
+        window: it is asleep, not down."""
+        for _ in range(4):
+            self.poll_at(self.ASLEEP)
+        self.assertEqual(self.sent, [])
 
 
 if __name__ == "__main__":

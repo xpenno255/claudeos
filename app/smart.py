@@ -7,13 +7,20 @@ every SWEEP_INTERVAL, evaluated against real-failure indicators
 (reallocated/pending sectors for ATA; critical warning, spare, media
 errors for NVMe), cached for the UI/report, and status *transitions*
 alert through the notification layer.
+
+The status last alerted for each disk is an `alertstate` latch, so it survives
+a restart, and a disk with no latch is taken to have been `ok`. A disk already
+failing the first time it is seen therefore alerts. It used to be treated as
+having nothing to compare against, and stayed silent through every sweep after
+(#73): the one disk the feature exists to catch, if it was already failing when
+ClaudeOS started.
 """
 
 import re
 import threading
 import time
 
-from . import notify, oplog, store, sweeper
+from . import alertstate, notify, oplog, store, sweeper
 from .connectors import proxmox
 
 SWEEP_INTERVAL = 6 * 3600
@@ -21,7 +28,6 @@ TEMP_WARN = 70  # °C — NVMe throttle/damage territory; ATA drives run cooler
 
 _lock = threading.Lock()
 _cache: dict = {"disks": [], "ts": None, "error": None}
-_status: dict = {}  # "node:devpath" -> last status, for transition alerts
 
 # smartctl NVMe health-log text → fields (values may contain thousands separators)
 NVME_FIELDS = {
@@ -143,23 +149,28 @@ def sweep(alert: bool = True) -> list:
         _cache.update(disks=disks, ts=time.time(), error=None)
 
     for d in disks:
-        key = f"{d['node']}:{d['devpath']}"
-        prev = _status.get(key)
-        _status[key] = d["status"]
-        if not alert or prev is None or prev == d["status"]:
-            continue  # first sight or unchanged — no alert
+        if not alert:
+            break  # the latch records alerts, so a silent sweep leaves it alone
+        subject = f"{d['node']}:{d['devpath']}"
+        # `ok` is the rest state and is stored as no latch at all, so a disk
+        # never seen before compares as `ok` and a failing one alerts.
+        prev = alertstate.claim("smart", subject,
+                                None if d["status"] == "ok" else d["status"])
+        if prev is alertstate.NO_CHANGE:
+            continue
+        key = f"smart:{subject}"
         label = f"{d['devpath']} ({d['model']}) on {d['node']}"
         if d["status"] != "ok":
             oplog.add("warn", "smart", f"disk {d['status']}: {label} — {'; '.join(d['issues'])}")
             notify.send(f"Disk {d['status'].upper()}: {d['devpath']} on {d['node']}",
                         f"{d['model']}: {'; '.join(d['issues'])}",
                         priority="urgent" if d["status"] == "fail" else "high",
-                        tags=["floppy_disk"], key=f"smart:{key}")
+                        tags=["floppy_disk"], key=key)
         else:
             oplog.add("info", "smart", f"disk recovered: {label}")
             notify.send(f"Disk recovered: {d['devpath']} on {d['node']}",
                         f"{d['model']}: SMART status back to ok",
-                        priority="default", tags=["white_check_mark"], key=f"smart:{key}")
+                        priority="default", tags=["white_check_mark"], key=key)
     return disks
 
 

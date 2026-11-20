@@ -169,8 +169,9 @@ arrive at that volume. What *does* page is the pair of states nobody would
 otherwise discover — where the feature has silently stopped working.
 
 **Severity is the gate, and it is the only one.** `notify.send` mutes an
-identical title for five minutes, but these titles carry the issue number, so no
-two are ever equal and the mute can never collapse them.
+identical title for five minutes when no subject key is given, which is the case
+here, but these titles carry the issue number, so no two are ever equal and the
+mute can never collapse them.
 
 A dead credential alerts **once per transition, not once per pass** — the sweep
 runs every 60s and none of these states heals, so per-pass would be 1,440 pushes
@@ -217,8 +218,8 @@ question; conflating them is what #47 proposed and ADR-0001's reasoning rejected
 **Hours in which a system being unreachable is not a fault** (`app/offhours.py`,
 `offline_from` / `offline_to` / `offline_grace_min` on its Setup card). A NAS on a
 DSM power schedule is off every night on purpose; without a window the poller reads
-that as a `True→False` transition and pages at `high` — the same volume as a failing
-disk — every single night.
+that as an outage and pages at `high` — the same volume as a failing disk — every
+single night.
 
 **A system inside its window is `scheduled off`, which is a third state beside up and
 down** — `ok: None` with `scheduled_off: true`, a dim non-blinking tile, and no alert
@@ -238,6 +239,20 @@ behind the connector seam.
 
 _Avoid_: "downtime", "maintenance window" — both suggest something is wrong or that
 work is happening. Nothing is wrong; the box is asleep on purpose.
+
+### Alert latch
+
+**The state a subject was last alerted as** — a system `down`, a disk `fail`, an
+image with an `update` — kept in `data/alerts.json` (`app/alertstate.py`), or in a
+backup job's own record for backups. Every alerter here alerts on a *transition*,
+and the latch is what it transitions from.
+
+**It records an alert, not an observation**, and it outlives the process. Healthy
+is the rest state and is stored as nothing, so a subject first seen in a bad state
+alerts (a system down at boot, a disk already failing), and a subject whose alert
+went out before a restart still gets its recovery afterwards (#73). Paired with a
+subject **key** on `notify.send`, which lets the five-minute mute drop a repeat of
+the same state without ever dropping a change of state (#72).
 
 ### Nowhere to go
 
