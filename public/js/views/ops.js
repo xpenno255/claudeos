@@ -6,6 +6,7 @@ import { el, fmtBytes, fmtPct, fmtUptime, debounce, clockTime, timeAgo, couldNot
 import { meter, sparkRow, sparkline } from "../charts.js";
 import { SYSTEMS, BY_ID } from "../meta.js";
 import { renderBackups } from "./backups.js";
+import { confirmAction, overflowMenu } from "../guard.js";
 
 const TABS = [
   { tab: "network",    label: "NETWORK",    sys: "unifi" },
@@ -81,37 +82,52 @@ function statePill(state, okStates = ["online", "running", "on", "ok"]) {
   return el("span", { class: `pill ${cls}` }, s.toUpperCase());
 }
 
-// Two-click confirm for anything disruptive.
-function actionBtn(label, run, { danger = false, confirm = true, accent = false, toast }) {
-  const btn = el("button", { class: `btn btn-mini ${danger ? "btn-danger" : accent ? "" : "btn-ghost"}` }, label);
-  let armed = false, timer = null;
+// Every action button goes through the one guard (#76): the confirm names the
+// action and its target and opens beside the button, never on it. `guard:
+// false` is for what changes nothing worth asking about (a light, a monitor
+// pause). tone: "danger" red, "caution" amber, "ghost" for quiet one-taps.
+function actionBtn(label, run, { tone = "danger", guard = true, target = "", detail = "", toast }) {
+  const cls = tone === "danger" ? "btn-danger" : tone === "ghost" ? "btn-ghost" : "";
+  const btn = el("button", { class: `btn btn-mini ${cls}`, type: "button" }, label);
+  if (guard) btn.setAttribute("aria-haspopup", "dialog");
   btn.addEventListener("click", async (e) => {
     e.stopPropagation();
-    if (confirm && !armed) {
-      armed = true;
-      btn.classList.add("confirming");
-      const orig = btn.textContent;
-      btn.textContent = "CONFIRM?";
-      timer = setTimeout(() => { armed = false; btn.classList.remove("confirming"); btn.textContent = orig; }, 3000);
-      return;
-    }
-    clearTimeout(timer);
-    btn.disabled = true;
-    btn.textContent = "…";
-    try {
-      const res = await run();
-      toast(res?.detail || "done", "ok", label);
-      btn.textContent = "SENT ✓";
-      setTimeout(() => location.reload(), 1400);
-    } catch (err) {
-      toast(String(err.message || err), "err", `${label} FAILED`);
-      btn.disabled = false;
-      btn.classList.remove("confirming");
-      btn.textContent = label;
-      armed = false;
-    }
+    if (btn.disabled) return;
+    if (guard && !await confirmAction(btn, { action: label, target, detail, tone: tone === "danger" ? "danger" : "caution" })) return;
+    execute(btn, label, run, toast);
   });
   return btn;
+}
+
+// Hard actions live behind "⋯" so they are never the nearest thing to a
+// thumb. Each item is still confirmed, and the confirm avoids the menu the
+// item was picked from, so a double tap on the item cannot land on CONFIRM.
+function hardMenu(items, target, toast) {
+  return overflowMenu(items.map(it => ({
+    label: it.label, tone: "danger",
+    select: async (btn, menuRect) => {
+      if (!await confirmAction(btn, { action: it.label, target, detail: it.detail, tone: "danger", avoid: [menuRect] })) return;
+      execute(btn, it.label, it.run, toast);
+    },
+  })), { title: `more actions for ${target}` });
+}
+
+// The result handling every action shares: busy, toast, reload on success;
+// toast and restore on failure.
+async function execute(btn, label, run, toast) {
+  const idle = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "…";
+  try {
+    const res = await run();
+    toast(res?.detail || "done", "ok", label);
+    btn.textContent = "SENT ✓";
+    setTimeout(() => location.reload(), 1400);
+  } catch (err) {
+    toast(String(err.message || err), "err", `${label} FAILED`);
+    btn.disabled = false;
+    btn.textContent = idle;
+  }
 }
 
 // ------------------------------------------------------------ NETWORK
@@ -179,13 +195,19 @@ async function network(body, toast) {
     el("td", {}, statePill(d.state)),
     el("td", {}, d.upgradable
       ? el("span", { title: d.upgrade_to ? `→ ${d.upgrade_to}` : "" },
-          actionBtn("⬆ UPDATE", () => api.unifiUpgrade(d.mac), { accent: true, toast }))
+          actionBtn("⬆ UPDATE", () => api.unifiUpgrade(d.mac), {
+            target: `${d.name || d.mac}${d.upgrade_to ? ` to ${d.upgrade_to}` : ""}`,
+            detail: "The device reboots to install it; everything behind it drops for a few minutes.",
+            toast }))
       : el("span", { class: "mono-dim" }, "current")),
     el("td", { class: "num" }, d.clients ?? "—"),
     el("td", { class: "num" }, d.cpu != null ? `${d.cpu}%` : "—"),
     el("td", { class: "num" }, fmtUptime(d.uptime)),
     el("td", {}, el("div", { class: "actions" },
-      actionBtn("RESTART", () => api.unifiRestart(d.mac), { danger: true, toast })))));
+      actionBtn("RESTART", () => api.unifiRestart(d.mac), {
+        target: d.name || d.mac,
+        detail: "The device reboots; everything behind it drops until it is back.",
+        toast })))));
 
   const cliRows = () => clients.map(c => el("tr", { "data-k": `${c.name} ${c.ip} ${c.essid || ""}`.toLowerCase() },
     el("td", { class: "strong" }, c.name || "—"),
@@ -435,11 +457,7 @@ async function compute(body, toast) {
         memPct != null ? `${memPct.toFixed(0)}%` : "—"),
       el("td", { class: "num" }, running ? fmtUptime(g.uptime) : "—"),
       el("td", {}, el("div", { class: "actions" },
-        running
-          ? [actionBtn("REBOOT", () => api.proxmoxAction(g.node, g.type, g.vmid, "reboot"), { danger: true, toast }),
-             actionBtn("SHUTDOWN", () => api.proxmoxAction(g.node, g.type, g.vmid, "shutdown"), { danger: true, toast }),
-             actionBtn("STOP", () => api.proxmoxAction(g.node, g.type, g.vmid, "stop"), { danger: true, toast })]
-          : [actionBtn("START", () => api.proxmoxAction(g.node, g.type, g.vmid, "start"), { confirm: false, toast })])));
+        guestActions(g, running, toast))));
     row.addEventListener("click", () => toggleGuestDetail(row, g));
     return row;
   });
@@ -491,6 +509,26 @@ async function compute(body, toast) {
     el("div", { class: "panel" },
       el("div", { class: "panel-title" }, `VIRTUAL MACHINES & CONTAINERS — ${guests.length}`),
       tableWrap([">VMID", "NAME", "TYPE", "NODE", "STATE", ">CPU", ">MEM", ">UPTIME", ""], guestRows)));
+}
+
+// Gentle actions stay one guarded tap away; SHUTDOWN and STOP leave the guest
+// off until someone notices, so they go behind "⋯".
+function guestActions(g, running, toast) {
+  const target = `${g.name || g.type} (${g.vmid})`;
+  const act = verb => () => api.proxmoxAction(g.node, g.type, g.vmid, verb);
+  if (!running) {
+    return [actionBtn("START", act("start"), { tone: "caution", target, toast })];
+  }
+  return [
+    actionBtn("REBOOT", act("reboot"), { target, toast,
+      detail: "The guest restarts; what runs on it drops until it is back." }),
+    hardMenu([
+      { label: "SHUTDOWN", run: act("shutdown"),
+        detail: "Asks the guest OS to power off. It stays off until someone starts it." },
+      { label: "STOP", run: act("stop"),
+        detail: "Hard power-off, like pulling the plug. Unsaved state is lost." },
+    ], target, toast),
+  ];
 }
 
 // ---------------------------------------------- COMPUTE: guest detail row
@@ -716,9 +754,11 @@ async function containers(body, toast, overview) {
       el("td", {}, (c.ports || []).join(", ") || "—"),
       el("td", {}, el("div", { class: "actions" },
         running
-          ? [actionBtn("RESTART", () => api.dockerAction(c.id, "restart"), { danger: true, toast }),
-             actionBtn("STOP", () => api.dockerAction(c.id, "stop"), { danger: true, toast })]
-          : [actionBtn("START", () => api.dockerAction(c.id, "start"), { confirm: false, toast })])));
+          ? [actionBtn("RESTART", () => api.dockerAction(c.id, "restart"), { target: c.name, toast,
+               detail: "Stops and starts the container; it is unreachable for a moment." }),
+             hardMenu([{ label: "STOP", run: () => api.dockerAction(c.id, "stop"),
+               detail: "It stays stopped until someone starts it." }], c.name, toast)]
+          : [actionBtn("START", () => api.dockerAction(c.id, "start"), { tone: "caution", target: c.name, toast })])));
   };
 
   // ---- container view vs stack view (grouped by compose project)
@@ -989,32 +1029,77 @@ async function home(body, toast) {
   let q = "";
   input.addEventListener("input", debounce(() => { q = input.value.toLowerCase(); apply(); }, 150));
 
-  const rows = entities.map(e => {
-    const row = el("tr", { "data-k": `${e.name} ${e.entity_id}`.toLowerCase(), "data-domain": e.domain },
+  // Built on demand and cached: a lab with a thousand entities rendered every
+  // row up front, and the page ran to 221,716px (#76). The filter still
+  // searches every entity; only what is drawn is paged.
+  const keyOf = e => `${e.name} ${e.entity_id}`.toLowerCase();
+  const built = new Map();
+  const rowFor = e => {
+    if (!built.has(e.entity_id)) built.set(e.entity_id, el("tr", {},
       el("td", { class: "strong" }, e.name),
       el("td", { class: "mono-dim" }, e.entity_id),
       el("td", {}, statePill(e.state, ["on", "home", "ok"])),
       el("td", {}, e.unit ? `${e.state} ${e.unit}` : "—"),
-      el("td", {}, el("div", { class: "actions" },
-        e.toggleable
-          ? actionBtn("TOGGLE", () => api.haService({ domain: "homeassistant", service: "toggle", entity_id: e.entity_id }), { confirm: false, toast })
-          : null)));
-    return row;
-  });
+      el("td", {}, el("div", { class: "actions" }, e.toggleable ? toggleBtn(e, toast) : null))));
+    return built.get(e.entity_id);
+  };
 
-  function apply() {
-    for (const r of rows) {
-      const matches = (!q || r.dataset.k.includes(q)) && (!domainFilter || r.dataset.domain === domainFilter);
-      r.style.display = matches ? "" : "none";
-    }
+  const tbody = el("tbody", {});
+  const shownEl = el("span", { class: "mono-dim" }, "");
+  const moreBtn = el("button", { class: "btn btn-ghost", type: "button" }, "");
+  let limit = HA_PAGE;
+  let matches = entities;
+  moreBtn.addEventListener("click", () => { limit += HA_PAGE; draw(); });
+
+  function draw() {
+    const page = matches.slice(0, limit);
+    tbody.replaceChildren(...page.map(rowFor));
+    const rest = matches.length - page.length;
+    shownEl.textContent = matches.length === entities.length
+      ? `${page.length} of ${entities.length} entities`
+      : `${page.length} of ${matches.length} matching · ${entities.length} total`;
+    moreBtn.textContent = `▾ SHOW ${Math.min(rest, HA_PAGE)} MORE`;
+    moreBtn.style.display = rest > 0 ? "" : "none";
   }
 
+  function apply() {
+    matches = entities.filter(e =>
+      (!q || keyOf(e).includes(q)) && (!domainFilter || e.domain === domainFilter));
+    limit = HA_PAGE;
+    draw();
+  }
+  draw();
+
   body.append(
-    el("div", { class: "ops-toolbar" }, input, select, el("div", { class: "spacer" }),
-      el("span", { class: "mono-dim" }, `${entities.length} entities`)),
+    el("div", { class: "ops-toolbar" }, input, select, el("div", { class: "spacer" }), shownEl),
     el("div", { class: "panel" },
       el("div", { class: "panel-title" }, "HOME ASSISTANT ENTITIES"),
-      tableWrap(["NAME", "ENTITY ID", "STATE", "VALUE", ""], rows)));
+      el("div", { class: "table-wrap" },
+        el("table", {},
+          el("thead", {}, el("tr", {}, ...["NAME", "ENTITY ID", "STATE", "VALUE", ""].map(h => el("th", {}, h)))),
+          tbody)),
+      el("div", { style: "margin-top:10px" }, moreBtn)));
+}
+
+const HA_PAGE = 100;
+
+// A light (or a fan) is in the room with you and flips straight back, so it
+// stays one tap. The rest of what the server marks toggleable can drive a
+// relay, a routine or whatever an automation reads, so it is asked about.
+const ONE_TAP_DOMAINS = new Set(["light", "fan"]);
+const TOGGLE_DETAIL = {
+  switch: "A switch can drive a relay and whatever is wired to it.",
+  automation: "Turns the automation on or off; its triggers stop or start firing.",
+  script: "Toggling a script runs it, or stops it if it is running.",
+  input_boolean: "Automations may act on this helper the moment it changes.",
+};
+
+function toggleBtn(e, toast) {
+  const run = () => api.haService({ domain: "homeassistant", service: "toggle", entity_id: e.entity_id });
+  return ONE_TAP_DOMAINS.has(e.domain)
+    ? actionBtn("TOGGLE", run, { guard: false, tone: "ghost", toast })
+    : actionBtn("TOGGLE", run, { tone: "caution", target: `${e.name} (${e.entity_id})`,
+        detail: TOGGLE_DETAIL[e.domain] || "", toast });
 }
 
 // ------------------------------------------------------------ HOME: panels
@@ -1364,7 +1449,7 @@ function monitorRow(m, points, toast) {
 
   const pauseBtn = actionBtn(m.enabled === false ? "RESUME" : "PAUSE",
     () => api.monitorUpdate(m.id, { enabled: m.enabled === false }),
-    { confirm: false, toast });
+    { guard: false, tone: "ghost", toast });
 
   return el("tr", { "data-k": `${m.name} ${m.type} ${m.target}`.toLowerCase() },
     el("td", {}, pill),
@@ -1377,7 +1462,7 @@ function monitorRow(m, points, toast) {
     el("td", { class: "num" }, m.since && m.ok != null ? fmtUptime(Date.now() / 1000 - m.since) : "—"),
     el("td", {}, el("div", { class: "actions" },
       pauseBtn,
-      actionBtn("REMOVE", () => api.monitorDelete(m.id), { danger: true, toast }))));
+      actionBtn("REMOVE", () => api.monitorDelete(m.id), { target: m.name, toast }))));
 }
 
 function monitorForm(toast) {

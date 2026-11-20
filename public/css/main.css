@@ -396,7 +396,61 @@ a.attn-row:hover .attn-go { color: var(--amber); }
 .btn-danger { background: rgba(208,59,59,.12); color: var(--critical); border-color: rgba(208,59,59,.45); }
 .btn-danger:hover { background: rgba(208,59,59,.24); box-shadow: 0 0 14px rgba(208,59,59,.25); }
 .btn-mini { padding: 3px 9px; font-size: 9.5px; letter-spacing: .12em; }
-.btn.confirming { background: rgba(208,59,59,.3); color: #ffd7d7; border-color: var(--critical); }
+.btn:focus-visible, .guard-item:focus-visible { outline: 1px solid var(--cyan); outline-offset: 2px; }
+
+/* ── guard: the one confirm for anything that changes the lab (#76) ──
+   Sits beside its trigger, never on it (guard.js places it), names the action
+   and the target, and CONFIRM charges for 400ms before it will take a click. */
+
+.guard {
+  position: fixed; z-index: 9000;
+  background: var(--panel-2); border: 1px solid var(--hairline-2);
+  box-shadow: 0 10px 34px rgba(0,0,0,.6), 0 0 0 1px rgba(0,0,0,.4);
+  animation: guard-in .14s ease-out both;
+}
+@keyframes guard-in { from { opacity: 0; transform: translateY(-3px); } }
+.guard[data-side="above"] { animation-name: guard-in-up; }
+@keyframes guard-in-up { from { opacity: 0; transform: translateY(3px); } }
+
+.guard-confirm {
+  width: min(340px, calc(100vw - 32px)); padding: 12px 14px 13px;
+  border-left: 3px solid var(--critical);
+}
+.guard-confirm.caution { border-left-color: var(--amber); }
+.guard-tag {
+  font-family: var(--font-display); font-size: 9.5px; font-weight: 600;
+  letter-spacing: .26em; color: var(--critical); margin-bottom: 6px;
+}
+.guard-confirm.caution .guard-tag { color: var(--amber); }
+.guard-q { font-size: 13px; color: var(--ink); line-height: 1.45; overflow-wrap: anywhere; }
+.guard-q b {
+  font-family: var(--font-display); font-weight: 600; letter-spacing: .12em;
+  color: var(--critical);
+}
+.guard-confirm.caution .guard-q b { color: var(--amber); }
+.guard-detail { font-size: 11.5px; color: var(--ink-2); margin-top: 5px; line-height: 1.5; }
+.guard-acts { display: flex; gap: 10px; justify-content: space-between; margin-top: 12px; }
+.guard-acts .btn { flex: 1; }
+/* CONFIRM fills as it arms; until then it is visibly not ready */
+.guard-go { position: relative; overflow: hidden; }
+.guard-go.arming { opacity: .55; cursor: wait; }
+.guard-go.arming::after {
+  content: ""; position: absolute; left: 0; bottom: 0; height: 2px; width: 100%;
+  background: currentColor; transform-origin: left; animation: guard-arm .4s linear both;
+}
+@keyframes guard-arm { from { transform: scaleX(0); } }
+
+.guard-menu { min-width: 170px; padding: 4px 0; display: flex; flex-direction: column; }
+.guard-item {
+  font-family: var(--font-display); font-size: 10.5px; font-weight: 600;
+  letter-spacing: .18em; text-align: left; cursor: pointer;
+  background: transparent; border: 0; border-left: 2px solid transparent;
+  color: var(--ink-2); padding: 9px 14px;
+}
+.guard-item:hover, .guard-item:focus { background: rgba(126,178,209,.07); color: var(--ink); outline: none; }
+.guard-item.danger { color: var(--critical); }
+.guard-item.danger:hover, .guard-item.danger:focus { background: rgba(208,59,59,.14); border-left-color: var(--critical); }
+.guard-more { font-size: 13px; line-height: 1; padding-top: 1px; padding-bottom: 3px; }
 
 /* ── tabs (operations) ─────────────────────────────────────────── */
 
@@ -446,7 +500,7 @@ tbody td a.strong {
   color: var(--ink); text-decoration: none; border-bottom: 1px dotted var(--hairline-2);
 }
 tbody td a.strong:hover { color: var(--amber); border-bottom-color: var(--amber); }
-td .actions { display: flex; gap: 6px; justify-content: flex-end; }
+td .actions { display: flex; gap: 8px; justify-content: flex-end; }
 .num { text-align: right; }
 
 /* ── setup forms ───────────────────────────────────────────────── */
@@ -564,7 +618,7 @@ td .actions { display: flex; gap: 6px; justify-content: flex-end; }
 
 @media (prefers-reduced-motion: reduce) {
   .view, .toast, .wordmark-glyph, .led, .rail-poll .dot, .blink-cursor::after,
-  .grade-F, .ai-running .spinner { animation: none !important; }
+  .grade-F, .ai-running .spinner, .guard { animation: none !important; }
   .view { opacity: 1; transform: none; }
 }
 
@@ -584,6 +638,14 @@ td .actions { display: flex; gap: 6px; justify-content: flex-end; }
   body > * { min-width: 0; }
   .chat-shell { flex-direction: column-reverse; }
   .chat-hist { width: 100%; max-height: 180px; }
+}
+
+/* touch: every button a thumb can hit is at least 40px (#76) */
+@media (max-width: 860px), (pointer: coarse) {
+  .btn { min-height: 40px; }
+  .btn-mini { min-width: 40px; padding: 6px 12px; font-size: 10px; }
+  td .actions { gap: 10px; }
+  .guard-item { min-height: 44px; padding: 12px 16px; font-size: 11px; }
 }
 
 /* ── ops chat (MISSION LOG) ─────────────────────────────────────── */
