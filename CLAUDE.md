@@ -17,7 +17,7 @@ flag is what guarantees it rather than relying on import order (#66).
 
 Standard library only — no pytest, no dev dependency. Coverage is **deliberately
 narrow**, and the bar is one thing: failure modes that are *silent and
-expensive*. Eight modules clear it.
+expensive*. Nine modules clear it.
 
 - `app/labissues.py` (with `app/triagelog.py`) — takes its GitHub caller, its
   analysis run and its tracker writes as arguments, so re-triage loops and
@@ -74,6 +74,14 @@ expensive*. Eight modules clear it.
   Not hypothetical: probing the cluster before the build found 25 consecutive
   nightly vzdump failures nobody knew about. `evaluate(jobs, now)` takes its
   clock as an argument, so no test waits and none touches the network.
+
+- `app/requestguard.py` — which requests are refused before routing (#70). A
+  cross-site POST or a DNS-rebinding page leaves no trace, because the server
+  logs no requests, and either one could drive the lab from any page the owner
+  merely opened. Half the tests pin what must keep working: curl pings with no
+  Origin, the healthcheck, and the owner's own LAN names. A guard that locks
+  those out gets reverted. Pure functions of header values, so there's no
+  socket.
 
 Two test files are not a module's. `tests/test_oplog_isolation.py` asserts only
 where the ops log writes, never what it records: the path used to be bound at

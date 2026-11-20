@@ -84,7 +84,12 @@ unprivileged as UID 1000). Update later with
 `docker compose pull && docker compose up -d`.
 
 Configuration env vars: `CLAUDEOS_DATA` (state dir, `/data` in the image),
-`CLAUDEOS_HOST` (bind, `0.0.0.0` in the image), `CLAUDEOS_PORT` (8321), `TZ`.
+`CLAUDEOS_HOST` (bind, `0.0.0.0` in the image), `CLAUDEOS_PORT` (8321), `TZ`,
+and `CLAUDEOS_ALLOWED_HOSTS`. That last one is a comma-separated list of real
+domains you reach ClaudeOS by, such as a reverse proxy's name. IP addresses,
+single-label names (`docker`) and `.lan`, `.local`, `.home.arpa` and
+`.internal` names work without it. Anything else is refused (see Security
+model).
 
 If the GHCR package is private, log the docker host in first:
 `docker login ghcr.io -u <owner>` with a PAT that has `read:packages`.
@@ -163,6 +168,14 @@ or `https://<nas-ip>:5001`.
   own** — if you expose it with `--host 0.0.0.0`, anyone on that network
   can drive your lab. Keep it on a trusted VLAN, or front it with a
   reverse proxy that adds auth (Authelia, Caddy basic-auth, Tailscale).
+- That covers people on the network, not **web pages**. A request that a
+  browser makes on another site's behalf is refused before routing
+  (`app/requestguard.py`, ADR-0003):
+  - A `Host` that an outsider could own (DNS rebinding) is refused.
+  - A write whose `Origin` is another site is refused.
+  - Requests with no `Origin` still work: curl, cron pings, the healthcheck.
+  - The UI can't be framed.
+  - The Home tab's toggle route accepts only `homeassistant.toggle`.
 - `data/` holds the key, encrypted config and ops log — exclude it from
   any backup or repo you share (`data/` is in `.gitignore`).
 
