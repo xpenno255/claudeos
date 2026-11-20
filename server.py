@@ -24,7 +24,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from app import (ai, backups, chat, labissues, monitors, notify, oplog, poller, registry,
-                 reports, scanner, smart, store, triagelog)
+                 reports, requestguard, scanner, smart, store, triagelog)
 from app.connectors import CONNECTORS, docker, homeassistant, proxmox, synology, unifi
 from app.httpclient import HttpError
 
@@ -487,13 +487,24 @@ def route_ha_entities(_m, _p, _b):
 
 
 def route_ha_service(_m, _p, body):
+    """The Home tab's TOGGLE, and nothing else.
+
+    This route used to take any domain, service and `data`, which made it a
+    general Home Assistant remote: `lock.unlock` and
+    `alarm_control_panel.alarm_disarm` included, with no confirm. The only
+    caller ever sent `homeassistant.toggle` for an entity the connector marks
+    toggleable, so that is now all it accepts (#70). Chat has its own,
+    separately allowlisted path (`tools.HA_ALLOWED_DOMAINS`).
+    """
     body = body or {}
     domain, service = body.get("domain"), body.get("service")
-    if not domain or not service:
-        raise ValueError("domain and service are required")
+    entity_id = str(body.get("entity_id") or "")
+    if (domain, service) != ("homeassistant", "toggle"):
+        raise ValueError("only homeassistant.toggle is accepted here")
+    if entity_id.split(".", 1)[0] not in homeassistant.TOGGLE_DOMAINS:
+        raise ValueError(f"{entity_id or 'entity_id'} is not a toggleable entity")
     res = homeassistant.call_service(
-        _settings("homeassistant"), domain, service,
-        entity_id=body.get("entity_id"), data=body.get("data"))
+        _settings("homeassistant"), domain, service, entity_id=entity_id)
     oplog.add("action", "homeassistant",
               f"{domain}.{service} → {body.get('entity_id') or '(no target)'}")
     return res
@@ -570,6 +581,23 @@ ROUTES = [
 ]
 
 
+_refusals_noted: set = set()
+
+
+def _note_refusal(why: str) -> None:
+    """Record each distinct refusal once per process.
+
+    Once, because an attack page can retry in a loop. Recorded at all, because
+    the likeliest refusal is the owner reaching ClaudeOS by a name the guard
+    doesn't know, and the message says how to fix that. The path is never
+    logged: it can carry a backup token (ADR-0002).
+    """
+    if why in _refusals_noted:
+        return
+    _refusals_noted.add(why)
+    oplog.add("warn", "claudeos", why)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ClaudeOS/1.0"
 
@@ -607,6 +635,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         # revalidate every load so UI updates are never held back by cache
         self.send_header("Cache-Control", "no-cache")
+        # The UI drives the lab, so another site must not frame it and trick
+        # a click onto a REBOOT button (#70).
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
 
@@ -685,6 +718,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def _dispatch(self, method):
         path = urllib.parse.urlparse(self.path).path
+
+        # Before anything is routed: refuse what a browser sends on another
+        # site's behalf (#70, ADR-0003). See app/requestguard.py.
+        why = requestguard.refusal(method, self.headers.get("Host"),
+                                   self.headers.get("Origin"),
+                                   self.headers.get("Sec-Fetch-Site"))
+        if why:
+            _note_refusal(why)
+            return self._send_json({"error": why}, 403)
 
         # Streaming chat routes bypass the JSON wrapper entirely.
         if method == "POST" and path in ("/api/chat/stream",):
