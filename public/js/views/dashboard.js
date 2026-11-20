@@ -2,33 +2,61 @@
 // health, container states and the live ops log.
 
 import { api } from "../api.js";
-import { el, fmtBytes, fmtPct, fmtUptime, clockTime, timeAgo } from "../util.js";
+import { el, fmtBytes, fmtPct, fmtUptime, clockTime, timeAgo, couldNotLoad } from "../util.js";
 import { sparkline, meter } from "../charts.js";
 import { SYSTEMS, BY_ID } from "../meta.js";
 
 const REFRESH_MS = 15000;
+// Consecutive failed refreshes before the page stops presenting its last render
+// as current. One is a blip; two is thirty seconds of a server not answering.
+const STALE_AFTER = 2;
 
 export async function renderDashboard(root) {
   let timer = null;
+  let lastOk = null;     // ms epoch of the last refresh that answered
+  let failures = 0;
+  let lastError = null;
+
+  // `head` holds what is true *about* the page — the attention strip, or that
+  // the page is stale — and `body` the last render. Kept apart so a failed
+  // refresh can say so without throwing the last good data away.
+  const head = el("div", {});
+  const body = el("div", {});
+  root.replaceChildren(head, body);
 
   async function draw() {
-    const [overview, history, log] = await Promise.all([
-      api.overview(), api.history(), api.log(),
-    ]);
-
-    const anyConfigured = Object.values(overview.config || {}).some(c => c.configured);
-    root.replaceChildren();
-
-    // Above the hero as well as the tiles: an alert can only have been lost if
-    // something was linked when it fired, and unlinking it does not un-lose it.
-    if (overview.alerting_gap) root.append(alertingGap(overview.alerting_gap));
-
-    if (!anyConfigured) {
-      root.append(hero());
+    let overview, history, log;
+    // The attention check failing must not take the dashboard with it, and
+    // must not be mistaken for an empty list either.
+    const attn = api.attention().catch(e => ({ error: e }));
+    try {
+      [overview, history, log] = await Promise.all([api.overview(), api.history(), api.log()]);
+    } catch (e) {
+      failures += 1;
+      lastError = e;
+      paintFailure();
       return;
     }
+    const attention = await attn;
+    failures = 0;
+    lastError = null;
+    lastOk = Date.now();
 
-    root.append(tiles(overview, history));
+    const anyConfigured = Object.values(overview.config || {}).some(c => c.configured);
+    head.replaceChildren(attentionStrip(attention));
+    body.classList.remove("is-stale");
+
+    // The strip carries the alerting gap now. Only when the strip could not
+    // check does the old banner come back, so an alert that went nowhere is
+    // never hidden behind a failed request for something else. Above the hero
+    // as well as the tiles: unlinking everything does not un-lose an alert.
+    const gap = attention.error && overview.alerting_gap ? alertingGap(overview.alerting_gap) : null;
+
+    if (!anyConfigured) {
+      body.replaceChildren(...[gap, hero()].filter(Boolean));
+      tickAge();
+      return;
+    }
 
     const grid = el("div", { class: "dash-grid" });
     grid.append(
@@ -37,15 +65,109 @@ export async function renderDashboard(root) {
       logPanel(log, "span-8"),
       statesPanel(overview, "span-4"),
     );
-    root.append(grid);
+    body.replaceChildren(...[gap, tiles(overview, history, attention.items || []), grid].filter(Boolean));
+    tickAge();
+  }
+
+  function paintFailure() {
+    if (lastOk === null) {
+      // Nothing was ever shown, so there is nothing to keep: say we could not look.
+      head.replaceChildren();
+      body.replaceChildren(couldNotLoad("The dashboard", lastError, () => draw()));
+      return;
+    }
+    if (failures >= STALE_AFTER) {
+      head.replaceChildren(staleBanner(lastError, () => draw()));
+      body.classList.add("is-stale");
+    }
+    tickAge();
+  }
+
+  // Ages are relative, so they are rewritten every second rather than once per
+  // refresh: a fixed "updated 3s ago" under a dead server is the same lie as
+  // the ticking clock this replaces (#75).
+  function tickAge() {
+    for (const n of root.querySelectorAll("[data-age]")) {
+      n.textContent = lastOk === null ? "never" : timeAgo(lastOk / 1000);
+    }
   }
 
   await draw();
   timer = setInterval(() => draw().catch(() => {}), REFRESH_MS);
-  return () => clearInterval(timer);
+  const ager = setInterval(tickAge, 1000);
+  return () => { clearInterval(timer); clearInterval(ager); };
 }
 
 // ---------------------------------------------------------------- pieces
+
+const SEV = {
+  critical: { glyph: "✕", label: "CRIT" },
+  warn:     { glyph: "▲", label: "WARN" },
+  info:     { glyph: "○", label: "NOTE" },
+};
+
+// What needs the owner (#75). Severity is a glyph and a word as well as a
+// colour. `info` never makes the strip loud: a waiting image update is worth a
+// line, not an interruption.
+function attentionStrip(att) {
+  const age = el("span", { "data-age": "" });
+  if (att.error) {
+    return el("div", { class: "panel attn attn-warn", role: "alert" },
+      el("div", { class: "attn-row warn" },
+        el("span", { class: "attn-glyph" }, "▲"),
+        el("span", { class: "attn-sev" }, "WARN"),
+        el("span", { class: "attn-text" },
+          el("b", {}, "COULD NOT CHECK"),
+          ` what needs attention (${String(att.error.message || att.error)}). `
+          + "This is not an all-clear — the lab's state is unknown.")),
+      el("div", { class: "attn-foot" }, "data updated ", age));
+  }
+
+  const items = att.items || [];
+  const loud = items.filter(i => i.severity !== "info");
+  const quiet = items.filter(i => i.severity === "info");
+  const worst = loud.some(i => i.severity === "critical") ? "crit" : loud.length ? "warn" : "clear";
+  const checked = att.checked ? clockTime(att.checked) : "?";
+
+  const panel = el("div", { class: `panel attn attn-${worst}` });
+  if (loud.length) {
+    panel.append(el("div", { class: "panel-title" }, `NEEDS ATTENTION — ${loud.length}`));
+  } else {
+    panel.append(el("div", { class: "attn-clear-line" },
+      el("span", { class: "attn-glyph" }, "✓"),
+      el("span", {}, "Nothing needs you"),
+      el("span", { class: "mono-dim" }, `checked ${checked}`)));
+  }
+  for (const i of [...loud, ...quiet]) panel.append(attnRow(i));
+  panel.append(el("div", { class: "attn-foot" },
+    loud.length ? `checked ${checked} · ` : "", "data updated ", age));
+  return panel;
+}
+
+function attnRow(i) {
+  const sev = SEV[i.severity] || SEV.warn;
+  const kids = [
+    el("span", { class: "attn-glyph" }, sev.glyph),
+    el("span", { class: "attn-sev" }, sev.label),
+    el("span", { class: "attn-text" }, i.text),
+  ];
+  return i.tab
+    ? el("a", { class: `attn-row ${i.severity}`, href: i.tab }, ...kids, el("span", { class: "attn-go" }, "›"))
+    : el("div", { class: `attn-row ${i.severity}` }, ...kids);
+}
+
+function staleBanner(err, retry) {
+  const btn = el("button", { class: "btn" }, "⟳ RETRY");
+  btn.addEventListener("click", () => { btn.disabled = true; retry(); });
+  return el("div", { class: "panel banner-alert attn-stale", role: "alert" },
+    el("div", { class: "glyph" }, "▲"),
+    el("div", { class: "banner-body" },
+      el("h3", {}, "STALE — SERVER UNREACHABLE"),
+      el("p", {}, `ClaudeOS has not answered the last ${STALE_AFTER} refreshes`
+        + `${err ? ` (${String(err.message || err)})` : ""}. Everything below is from `,
+        el("b", { "data-age": "" }), " and may no longer be true.")),
+    btn);
+}
 
 function hero() {
   return el("div", { class: "panel accent hero-empty" },
@@ -55,8 +177,9 @@ function hero() {
     el("a", { href: "#/setup" }, el("button", { class: "btn" }, "▸ OPEN SETUP")));
 }
 
-// Shown only once an alert has actually been discarded, so it names what was
-// lost rather than warning about what might be.
+// The fallback for when the attention strip could not check, since it normally
+// carries this. Shown only once an alert has actually been discarded, so it
+// names what was lost rather than warning about what might be.
 function alertingGap(gap) {
   const n = gap.count;
   const last = gap.last_title
@@ -70,16 +193,17 @@ function alertingGap(gap) {
     el("a", { href: "#/setup" }, el("button", { class: "btn" }, "▸ OPEN SETUP")));
 }
 
-function statusLed(st) {
+function statusLed(st, warn = false) {
   // scheduled_off is its own state: neither healthy nor broken. It must not
   // blink red — a tile that cries wolf every night stops being read.
+  // `warn` is answering-but-not-fine: up, with something on the strip (#75).
   const cls = st?.scheduled_off ? "sleep"
-    : st?.ok === true ? "ok"
+    : st?.ok === true ? (warn ? "warn" : "ok")
       : st?.ok === false ? "err" : "off";
   return el("span", { class: `led ${cls}` });
 }
 
-function tiles(overview, history) {
+function tiles(overview, history, attention) {
   const wrap = el("div", { class: "tiles" });
   for (const sys of SYSTEMS) {
     const cfg = overview.config?.[sys.id];
@@ -120,11 +244,16 @@ function tiles(overview, history) {
     const configured = cfg?.configured;
     const asleep = !!st?.scheduled_off;
     if (asleep) { big = "—"; unit = "asleep"; }
+    // Green used to mean only that the API answered. A system with something
+    // on the strip says so, by glyph and count as well as by colour.
+    const flagged = attention.filter(i => i.system === sys.id && i.severity !== "info").length;
+    const warn = st?.ok === true && flagged > 0;
     const tile = el("div", {
-      class: `panel tile ${configured ? "" : "tile-unconfigured"}`,
+      class: `panel tile ${configured ? "" : "tile-unconfigured"} ${warn ? "tile-warn" : ""}`,
       onclick: () => { location.hash = configured ? `#/ops/${sys.tab}` : "#/setup"; },
     },
-      el("div", { class: "tile-head" }, statusLed(st), el("span", { class: "tile-name" }, sys.label),
+      el("div", { class: "tile-head" }, statusLed(st, warn), el("span", { class: "tile-name" }, sys.label),
+        warn ? el("span", { class: "tile-flag", title: "see Needs Attention above" }, `▲ ${flagged}`) : null,
         el("span", { class: "mono-dim" },
           configured ? (asleep ? "SCHEDULED OFF" : "") : "NOT LINKED")),
       el("div", { class: "tile-big" }, configured ? big : "···", " ",

@@ -185,6 +185,18 @@ def get(max_age: int = SWEEP_INTERVAL) -> dict:
         return dict(_cache)
 
 
+def peek() -> dict:
+    """The cached sweep as it stands, never refreshing it.
+
+    `get()` sweeps synchronously when the cache is old, which is right for the
+    tab that asked and wrong for the dashboard's attention strip: that runs on
+    every refresh and must only read what the app already knows, so a stale or
+    empty cache is reported as such rather than repaired over the network.
+    """
+    with _lock:
+        return dict(_cache)
+
+
 def start() -> None:
     sweeper.spawn("smart", sweep, SWEEP_INTERVAL,
                   system="smart", error="SMART sweep failed")

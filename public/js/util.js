@@ -48,6 +48,31 @@ export function clockTime(ts) {
   return new Date(ts * 1000).toLocaleTimeString([], { hour12: false });
 }
 
+// "We could not look" — distinct from "there is nothing here", which is the
+// confusion #75 found in three views. Every empty state in this app is a claim
+// about the lab; a failed fetch makes no claim at all, so it must not borrow
+// one. `onRetry` defaults to re-rendering the current route, which also runs
+// the view's cleanup.
+export function rerender() {
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
+}
+
+export function couldNotLoad(what, err, onRetry = rerender) {
+  const retry = el("button", { class: "btn" }, "⟳ RETRY");
+  retry.addEventListener("click", () => {
+    retry.disabled = true;
+    retry.textContent = "… RETRYING";
+    onRetry();
+  });
+  const why = err ? String(err.message || err) : "";
+  return el("div", { class: "panel load-fail", role: "alert" },
+    el("div", { class: "glyph" }, "▲"),
+    el("h2", {}, "COULD NOT LOAD"),
+    el("p", {}, `${what} could not be read${why ? ` (${why})` : ""}. `
+      + "This is not the same as there being nothing here — the state is unknown."),
+    retry);
+}
+
 // Debounce for search boxes.
 export function debounce(fn, ms = 200) {
   let t;

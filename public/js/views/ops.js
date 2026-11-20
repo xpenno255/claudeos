@@ -2,7 +2,7 @@
 // Tabs: NETWORK (UniFi) / COMPUTE (Proxmox) / CONTAINERS (Docker) / HOME (HA) / NAS (Synology)
 
 import { api } from "../api.js";
-import { el, fmtBytes, fmtPct, fmtUptime, debounce, clockTime, timeAgo } from "../util.js";
+import { el, fmtBytes, fmtPct, fmtUptime, debounce, clockTime, timeAgo, couldNotLoad } from "../util.js";
 import { meter, sparkRow, sparkline } from "../charts.js";
 import { SYSTEMS, BY_ID } from "../meta.js";
 import { renderBackups } from "./backups.js";
@@ -20,7 +20,14 @@ const TABS = [
 
 export async function renderOps(root, args, { toast }) {
   const active = TABS.find(t => t.tab === args[0])?.tab || "network";
-  const overview = await api.overview().catch(() => ({ systems: {}, config: {} }));
+  // Kept, not swallowed: a failed overview used to read as an empty config,
+  // and every connector tab then said "SYSTEM NOT LINKED" (#75). The three
+  // tabs that are not one system's still render — they never read it.
+  let overviewError = null;
+  const overview = await api.overview().catch(e => {
+    overviewError = e;
+    return { systems: {}, config: {} };
+  });
 
   const tabs = el("div", { class: "tabs" });
   for (const t of TABS) {
@@ -36,6 +43,10 @@ export async function renderOps(root, args, { toast }) {
 
   const activeSys = TABS.find(t => t.tab === active).sys;
   const cfg = activeSys ? overview.config?.[activeSys] : null;
+  if (activeSys && overviewError) {
+    body.append(couldNotLoad(`The link status of ${BY_ID[activeSys]?.label || activeSys}`, overviewError));
+    return;
+  }
   if (activeSys && !cfg?.configured) {
     body.append(el("div", { class: "panel hero-empty" },
       el("h2", {}, "SYSTEM NOT LINKED"),
@@ -110,7 +121,8 @@ async function network(body, toast) {
     api.unifiDevices(), api.unifiClients(),
     api.unifiInsights().catch(e => ({ error: String(e.message || e) })),
     api.unifiEvents({ categories: ["SECURITY"] }).catch(e => ({ error: String(e.message || e) })),
-    api.unifiAnomalies().catch(() => ({ anomalies: [] })),
+    // an error, not an empty list: empty renders "NO CLIENT ANOMALIES DETECTED"
+    api.unifiAnomalies().catch(e => ({ error: e })),
   ]);
 
   // ---- gateway (UDM-SE) health
@@ -196,10 +208,10 @@ async function network(body, toast) {
 
   body.append(
     toolbar("filter devices & clients…", q => filterRows(body, q)),
-    el("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:14px" },
+    el("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(min(380px,100%),1fr));gap:14px" },
       gwPanel, portPanel),
     el("div", { class: "section-gap" }),
-    eventsPanel(eventsRes, anomaliesRes.anomalies || [], toast),
+    eventsPanel(eventsRes, anomaliesRes, toast),
     el("div", { class: "section-gap" }),
     devPanel, el("div", { class: "section-gap" }), cliPanel);
 }
@@ -212,7 +224,9 @@ const EVT_FILTERS = [
   { label: "ALL EVENTS", cats: null },
 ];
 
-function eventsPanel(initial, anomalies, toast) {
+function eventsPanel(initial, anomaliesRes, toast) {
+  let anomalies = anomaliesRes.anomalies || [];
+  let anomError = anomaliesRes.error || null;
   const panel = el("div", { class: "panel" },
     el("div", { class: "panel-title" }, "EVENTS & THREATS — GATEWAY LOG"));
   if (initial.error) {
@@ -240,14 +254,20 @@ function eventsPanel(initial, anomalies, toast) {
     });
     return b;
   });
-  const anomChip = el("button", { class: "btn btn-mini btn-ghost" },
-    `CLIENT ANOMALIES${anomalies.length ? ` (${anomalies.length})` : ""}`);
+  const anomChip = el("button", { class: "btn btn-mini btn-ghost" });
+  const anomLabel = () => {
+    anomChip.textContent = anomError ? "CLIENT ANOMALIES ▲"
+      : `CLIENT ANOMALIES${anomalies.length ? ` (${anomalies.length})` : ""}`;
+  };
+  const anomCount = () => anomError ? "could not load"
+    : `${anomalies.length} anomalous client${anomalies.length === 1 ? "" : "s"}`;
+  anomLabel();
   anomChip.addEventListener("click", () => {
     setActive(anomChip);
     seq += 1;  // drop any in-flight event load
     eventsWrap.style.display = "none";
     anomWrap.style.display = "";
-    countEl.textContent = `${anomalies.length} anomalous client${anomalies.length === 1 ? "" : "s"}`;
+    countEl.textContent = anomCount();
   });
   const allChips = [...chips, anomChip];
 
@@ -312,21 +332,23 @@ function eventsPanel(initial, anomalies, toast) {
     }
   }
 
-  // ---- anomalies tab content (stat/anomalies — fetched once per render)
-  const anomWrap = el("div", { style: "display:none" },
-    anomalies.length
-      ? el("div", { class: "table-wrap", style: "max-height:420px;overflow-y:auto" },
-          el("table", {},
-            el("thead", {}, el("tr", {}, ...["CLIENT", "ANOMALY", ">COUNT", "LAST SEEN"].map(h =>
-              el("th", { class: h.startsWith(">") ? "num" : "" }, h.replace(/^>/, ""))))),
-            el("tbody", {}, ...anomalies.map(a => el("tr", {},
-              el("td", { class: "strong" }, a.client),
-              el("td", {}, (a.anomaly || "").replace(/_/g, " ").toLowerCase()),
-              el("td", { class: "num" }, a.count),
-              el("td", { class: "mono-dim" }, a.last_ts
-                ? new Date(a.last_ts * 1000).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
-                : "—"))))))
-      : el("div", { class: "pill ok" }, "● NO CLIENT ANOMALIES DETECTED"));
+  // ---- anomalies tab content (stat/anomalies — fetched once per render, and
+  // again on RETRY when that fetch failed)
+  const anomWrap = el("div", { style: "display:none" });
+  const anomFill = () => anomWrap.replaceChildren(anomError
+    ? couldNotLoad("Client anomalies", anomError, async () => {
+        try {
+          anomalies = (await api.unifiAnomalies()).anomalies || [];
+          anomError = null;
+        } catch (e) {
+          anomError = e;
+        }
+        anomFill();
+        anomLabel();
+        countEl.textContent = anomCount();
+      })
+    : anomContent(anomalies));
+  anomFill();
 
   const eventsWrap = el("div", {},
     el("div", { class: "table-wrap", style: "max-height:420px;overflow-y:auto" },
@@ -345,6 +367,22 @@ function eventsPanel(initial, anomalies, toast) {
   countEl.textContent = `${initial.total ?? "?"} total · page 1/${initial.pages ?? "?"}`;
   if (initial.pages && initial.pages <= 1) moreBtn.style.display = "none";
   return panel;
+}
+
+function anomContent(anomalies) {
+  return anomalies.length
+    ? el("div", { class: "table-wrap", style: "max-height:420px;overflow-y:auto" },
+        el("table", {},
+          el("thead", {}, el("tr", {}, ...["CLIENT", "ANOMALY", ">COUNT", "LAST SEEN"].map(h =>
+            el("th", { class: h.startsWith(">") ? "num" : "" }, h.replace(/^>/, ""))))),
+          el("tbody", {}, ...anomalies.map(a => el("tr", {},
+            el("td", { class: "strong" }, a.client),
+            el("td", {}, (a.anomaly || "").replace(/_/g, " ").toLowerCase()),
+            el("td", { class: "num" }, a.count),
+            el("td", { class: "mono-dim" }, a.last_ts
+              ? new Date(a.last_ts * 1000).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+              : "—"))))))
+    : el("div", { class: "pill ok" }, "● NO CLIENT ANOMALIES DETECTED");
 }
 
 function triageCard(r) {
@@ -446,7 +484,7 @@ async function compute(body, toast) {
     toolbar("filter guests…", q => filterRows(body, q)),
     nodePanel,
     el("div", { class: "section-gap" }),
-    el("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:14px" }, storagePanel, perfPanel),
+    el("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(min(380px,100%),1fr));gap:14px" }, storagePanel, perfPanel),
     el("div", { class: "section-gap" }),
     diskPanel(disksRes, toast),
     el("div", { class: "section-gap" }),
@@ -1239,7 +1277,7 @@ async function nas(body, toast, overview) {
       : tableWrap(["BAY", "MODEL", "SERIAL", ">SIZE", ">TEMP", "STATUS", "SMART"], diskRows));
 
   body.append(
-    el("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:14px" }, sysPanel, volPanel),
+    el("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(min(380px,100%),1fr));gap:14px" }, sysPanel, volPanel),
     el("div", { class: "section-gap" }),
     diskPanel);
 }

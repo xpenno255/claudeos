@@ -45,6 +45,7 @@
   <div class="rail-foot">
     <div class="rail-clock" id="clock">--:--:--</div>
     <div class="rail-poll" id="poll-indicator"><span class="dot"></span> LINK IDLE</div>
+    <div class="rail-age" id="data-age"></div>
   </div>
 </aside>
 
@@ -52,6 +53,7 @@
   <header class="stage-head">
     <div class="crumb" id="crumb">/// DASHBOARD</div>
     <div class="stage-head-right">
+      <span class="pill warn stale-flag" id="stale-flag" role="status" hidden>▲ STALE — SERVER UNREACHABLE</span>
       <button class="btn btn-ghost" id="refresh-btn" title="Poll all systems now">⟳ SYNC</button>
     </div>
   </header>
