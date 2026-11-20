@@ -251,6 +251,34 @@ def reported_ok(body: dict) -> bool:
     return bool(v)
 
 
+UNPARSEABLE_DETAIL = ("the ping's body was not valid JSON, so it is recorded as a "
+                      "failure; check how the job builds its -d payload")
+
+
+def ping_fields(body) -> dict:
+    """`record_run` keyword arguments for a ping's body.
+
+    No body is the documented minimum, and means success. A body that couldn't
+    be parsed means failure (#71). The job did report in, and a shell script
+    that mangles its JSON was most likely substituting a failing exit code or an
+    error message with a quote in it. Reading that as success holds a dead job
+    green.
+    """
+    from . import body as _body
+    if body is _body.UNPARSEABLE:
+        return {"ok": False, "detail": UNPARSEABLE_DETAIL}
+    if body is None:
+        body = {}
+    if not isinstance(body, dict):
+        # `-d "$rc"` sends a bare number. It's no more readable than broken
+        # JSON, and success is the one reading that can't be justified.
+        return {"ok": False, "detail": "the ping's body was JSON but not an object "
+                                       f"({str(body)[:60]}), so it is recorded as a failure"}
+    b = body
+    return {"ok": reported_ok(b), "size_bytes": b.get("bytes"),
+            "duration_s": b.get("duration_s"), "detail": b.get("detail")}
+
+
 def _num(v, default):
     if v is None or v == "":
         return default
