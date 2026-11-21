@@ -293,6 +293,16 @@ def disk_smart(settings: dict, node: str, devpath: str) -> dict:
     return _call(settings, "GET", f"/nodes/{node}/disks/smart?disk={q}").get("data", {})
 
 
+def _num(v):
+    """A PVE value that may arrive as a number or a numeric string; else None."""
+    if isinstance(v, bool):
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def guest_detail(settings: dict, node: str, gtype: str, vmid: str) -> dict:
     """Extended live stats for one guest (status/current), including the
     balloon inside-guest memory view and PSI pressure counters (verified
@@ -302,7 +312,9 @@ def guest_detail(settings: dict, node: str, gtype: str, vmid: str) -> dict:
         "name", "status", "qmpstatus", "uptime", "cpus", "cpu",
         "mem", "maxmem", "memhost", "freemem", "disk", "maxdisk",
         "diskread", "diskwrite", "netin", "netout", "swap", "maxswap", "agent")}
-    out["pressure"] = {k[len("pressure"):]: st.get(k)
+    # PVE sends these as numbers for VMs but as strings ("0.00") for LXC, and
+    # the view does arithmetic on them (#89).
+    out["pressure"] = {k[len("pressure"):]: _num(st.get(k))
                        for k in st if k.startswith("pressure")}
     bi = st.get("ballooninfo") or {}
     if bi:
