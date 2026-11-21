@@ -8,7 +8,7 @@
 // carry a body and its auto-reconnect would replay turns).
 
 import { api } from "../api.js";
-import { el, clockTime } from "../util.js";
+import { el, clockTime, pressable } from "../util.js";
 import { BY_ID } from "../meta.js";
 
 const SYS_OF = {
@@ -87,7 +87,7 @@ export async function renderChat(root, args, { toast }) {
 
   // ---- composer
   const input = el("textarea", { class: "chat-input", rows: "1",
-    placeholder: "ask about your lab…" });
+    placeholder: "ask about your lab…", "aria-label": "ask about your lab" });
   const sendBtn = el("button", { class: "btn btn-mini" }, "SEND ▸");
   const costLine = el("div", { class: "chat-meta" });
   const composer = el("div", { class: "px-composer chat-composer" }, input, sendBtn);
@@ -149,6 +149,7 @@ export async function renderChat(root, args, { toast }) {
       const open = body.style.display === "none";
       body.style.display = open ? "block" : "none";
       caret.textContent = open ? "▾" : "▸";
+      head.setAttribute("aria-expanded", String(open));
     } },
       caret,
       el("span", { class: "chat-strip-name" }, name),
@@ -156,6 +157,7 @@ export async function renderChat(root, args, { toast }) {
       el("span", { class: `pill ${STATUS_CLASS[st] || "neutral"}` }, st.toUpperCase()),
       el("span", { style: "color:var(--ink-3)" },
         envelope?.elapsed_ms != null ? `${envelope.elapsed_ms}ms` : ""));
+    pressable(head, { expanded: false });  // keyboard-operable (#87)
     const wrap = el("div", { class: "chat-strip", style: `--sysc:${toolColor(name)}` },
       head, body);
     log.append(wrap);
@@ -164,7 +166,7 @@ export async function renderChat(root, args, { toast }) {
 
   function approvalCard(pending, envelope) {
     const guidance = el("input", { class: "chat-guidance", type: "text",
-      placeholder: "…tell Claude what to do instead" });
+      placeholder: "…tell Claude what to do instead", "aria-label": "what to do instead" });
     guidance.style.display = "none";
 
     const act = (decision) => async () => {

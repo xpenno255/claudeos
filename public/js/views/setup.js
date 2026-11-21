@@ -3,7 +3,7 @@
 // "stored", never the value.
 
 import { api } from "../api.js";
-import { el } from "../util.js";
+import { el, labelFor } from "../util.js";
 import { BY_ID } from "../meta.js";
 import { confirmAction } from "../guard.js";
 
@@ -217,10 +217,16 @@ function card(form, cfg, status, toast, models) {
       autocomplete: "off",
     });
     inputs[f.key] = input;
+    // Tied by id, and named for its card: several cards have a "HOST" field,
+    // and a screen reader moving between fields hears only the label (#87).
+    input.id = `setup-${form.id}-${f.key}`;
+    const hint = f.hint ? el("div", { class: "hint", id: `${input.id}-hint` }, f.hint) : null;
+    if (hint) input.setAttribute("aria-describedby", hint.id);
     return el("div", { class: "field" },
-      el("label", {}, f.label, " ", stored ? el("span", { class: "secret-set" }, "● ENCRYPTED & STORED") : ""),
+      labelFor(input, el("span", { class: "sr-only" }, `${form.title}: `), f.label, " ",
+        stored ? el("span", { class: "secret-set" }, "● ENCRYPTED & STORED") : ""),
       input,
-      f.hint ? el("div", { class: "hint" }, f.hint) : null);
+      hint);
   });
 
   let tlsCheck = null;

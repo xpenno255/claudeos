@@ -5,7 +5,7 @@
 // severity order (backups._SEVERITY) so the ordering is one decision, not two.
 
 import { api } from "../api.js";
-import { el, fmtBytes, timeAgo, couldNotLoad } from "../util.js";
+import { el, fmtBytes, timeAgo, couldNotLoad, labelFor } from "../util.js";
 import { sparkline } from "../charts.js";
 import { confirmAction } from "../guard.js";
 
@@ -205,9 +205,10 @@ function snippet(text, toast) {
 
 
 function jobForm(toast) {
-  const name = el("input", { placeholder: "nightly postgres dump" });
+  const name = el("input", { type: "text", placeholder: "nightly postgres dump" });
   const hours = el("input", { placeholder: "24", type: "number", min: "1" });
-  const grace = el("input", { placeholder: "auto (schedule × 1.1)", type: "number", min: "1" });
+  const grace = el("input", { placeholder: "auto (schedule × 1.1)", type: "number", min: "1",
+    "aria-describedby": "backup-grace-hint" });
   const out = el("div", { class: "mono-dim", style: "margin-top:10px" });
 
   const save = el("button", { class: "btn" }, "CREATE");
@@ -238,10 +239,10 @@ function jobForm(toast) {
   return el("div", { class: "panel accent", style: "margin-bottom:14px" },
     el("div", { class: "panel-title" }, "NEW HEARTBEAT JOB"),
     el("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:0 18px" },
-      el("div", { class: "field" }, el("label", {}, "NAME"), name),
-      el("div", { class: "field" }, el("label", {}, "EXPECTED EVERY (HOURS)"), hours),
-      el("div", { class: "field" }, el("label", {}, "GRACE (HOURS)"), grace,
-        el("div", { class: "hint" }, "blank derives it from the schedule"))),
+      el("div", { class: "field" }, labelFor(name, "NAME"), name),
+      el("div", { class: "field" }, labelFor(hours, "EXPECTED EVERY (HOURS)"), hours),
+      el("div", { class: "field" }, labelFor(grace, "GRACE (HOURS)"), grace,
+        el("div", { class: "hint", id: "backup-grace-hint" }, "blank derives it from the schedule"))),
     el("div", { class: "setup-actions" }, save),
     out);
 }

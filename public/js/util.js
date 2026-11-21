@@ -73,6 +73,32 @@ export function couldNotLoad(what, err, onRetry = rerender) {
     retry);
 }
 
+// A <label> tied to its control by id (#87). A label that only sits next to an
+// input is a caption to a sighted reader and nothing at all to a screen reader,
+// which then announces the placeholder — or, for a stored secret, "•••••".
+let controlSeq = 0;
+export function labelFor(control, ...children) {
+  if (!control.id) control.id = `ctl-${++controlSeq}`;
+  return el("label", { for: control.id }, ...children);
+}
+
+// For a click target that cannot become a real <button> without breaking its
+// layout (a panel heading, a stack of meters): reachable by Tab, announced as a
+// button, and operated by Enter or Space like one (#87). Its click handler is
+// unchanged; the keys just call it. `expanded`, when given, is the initial
+// aria-expanded — the handler keeps it current.
+export function pressable(node, { expanded } = {}) {
+  node.setAttribute("role", "button");
+  node.tabIndex = 0;
+  if (expanded !== undefined) node.setAttribute("aria-expanded", String(expanded));
+  node.addEventListener("keydown", e => {
+    if (e.target !== node || (e.key !== "Enter" && e.key !== " ")) return;
+    e.preventDefault();
+    node.click();
+  });
+  return node;
+}
+
 // Debounce for search boxes.
 export function debounce(fn, ms = 200) {
   let t;

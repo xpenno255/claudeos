@@ -2,7 +2,7 @@
 // Tabs: NETWORK (UniFi) / COMPUTE (Proxmox) / CONTAINERS (Docker) / HOME (HA) / NAS (Synology)
 
 import { api } from "../api.js";
-import { el, fmtBytes, fmtPct, fmtUptime, debounce, clockTime, timeAgo, couldNotLoad } from "../util.js";
+import { el, fmtBytes, fmtPct, fmtUptime, debounce, clockTime, timeAgo, couldNotLoad, labelFor, pressable } from "../util.js";
 import { meter, sparkRow, sparkline } from "../charts.js";
 import { SYSTEMS, BY_ID } from "../meta.js";
 import { renderBackups } from "./backups.js";
@@ -63,7 +63,7 @@ export async function renderOps(root, args, { toast }) {
 // ------------------------------------------------------------ helpers
 
 function toolbar(placeholder, onSearch, extra = []) {
-  const input = el("input", { class: "search", type: "text", placeholder });
+  const input = el("input", { class: "search", type: "text", placeholder, "aria-label": placeholder });
   input.addEventListener("input", debounce(() => onSearch(input.value.toLowerCase()), 150));
   return el("div", { class: "ops-toolbar" }, input, el("div", { class: "spacer" }), ...extra);
 }
@@ -448,7 +448,10 @@ async function compute(body, toast) {
     const memPct = running && g.maxmem ? 100 * g.mem / g.maxmem : null;
     const row = el("tr", { "data-k": `${g.name} ${g.vmid} ${g.type} ${g.node}`.toLowerCase(), style: "cursor:pointer", title: "click for extended stats & graphs" },
       el("td", { class: "num" }, g.vmid),
-      el("td", { class: "strong" }, g.name || "—"),
+      // The row still takes the click; the name is the button a keyboard can
+      // reach, and it says whether the row is open (#87).
+      el("td", { class: "strong" }, el("button", { class: "row-toggle", type: "button",
+        "aria-expanded": "false", title: "extended stats & graphs" }, g.name || "—")),
       el("td", {}, el("span", { class: "pill neutral" }, g.type === "qemu" ? "VM" : "LXC")),
       el("td", {}, g.node),
       el("td", {}, statePill(g.status)),
@@ -534,7 +537,13 @@ function guestActions(g, running, toast) {
 // ---------------------------------------------- COMPUTE: guest detail row
 
 function toggleGuestDetail(row, g) {
-  if (row._detail) { row._detail.remove(); row._detail = null; return; }
+  const toggle = row.querySelector(".row-toggle");
+  if (row._detail) {
+    row._detail.remove(); row._detail = null;
+    toggle?.setAttribute("aria-expanded", "false");
+    return;
+  }
+  toggle?.setAttribute("aria-expanded", "true");
   const td = el("td", { colspan: "9" },
     el("div", { class: "ai-running" }, el("div", { class: "spinner" }), "loading guest stats…"));
   const tr = el("tr", {}, td);
@@ -712,10 +721,12 @@ async function containers(body, toast, overview) {
           { detail: g.temp != null ? `${g.temp}°C` : "" }),
         meter("GPU VRAM", g.mem_pct, {}),
       ]);
-      const clickable = el("div", { style: "cursor:pointer", title: "click for per-container GPU usage" }, ...meters);
+      const clickable = pressable(el("div", { style: "cursor:pointer", title: "click for per-container GPU usage" }, ...meters),
+        { expanded: false });
       clickable.addEventListener("click", () => {
         const hidden = gpuDetail.style.display === "none";
         gpuDetail.style.display = hidden ? "" : "none";
+        clickable.setAttribute("aria-expanded", String(hidden));
         if (hidden && !gpuDetail.childElementCount) gpuDetail.append(gpuDetailView(gpuRes));
       });
       gpuSection = [clickable, gpuDetail];
@@ -781,20 +792,21 @@ async function containers(body, toast, overview) {
       const cs = groups.get(key);
       const runningN = cs.filter(c => c.state === "running").length;
       const updN = cs.filter(c => updByRef[normRef(c.image)]?.status === "update").length;
-      const chev = el("span", { class: "mono-dim", style: "width:12px" }, "▸");
+      // the stack name is the keyboard's way in; the row still takes the click (#87)
+      const chev = el("button", { class: "row-toggle lead", type: "button", "aria-expanded": "false" },
+        el("b", { style: "letter-spacing:.08em" }, key || "STANDALONE CONTAINERS"));
       const children = cs.map(c => { const r = makeRow(c); r.style.display = "none"; return r; });
       const head = el("tr", { class: "stack-head" },
         el("td", { colspan: "8" },
           el("div", { style: "display:flex;align-items:center;gap:10px" },
             chev,
-            el("b", { style: "letter-spacing:.08em" }, key || "STANDALONE CONTAINERS"),
             el("span", { class: "mono-dim" }, `${cs.length} container${cs.length === 1 ? "" : "s"}`),
             el("span", { class: `pill ${runningN === cs.length ? "ok" : runningN ? "warn" : "neutral"}` },
               `${runningN}/${cs.length} RUNNING`),
             updN ? el("span", { class: "pill warn" }, `⬆ ${updN} UPDATE${updN > 1 ? "S" : ""}`) : "")));
       head.addEventListener("click", () => {
-        const open = chev.textContent === "▾";
-        chev.textContent = open ? "▸" : "▾";
+        const open = chev.getAttribute("aria-expanded") === "true";
+        chev.setAttribute("aria-expanded", String(!open));
         children.forEach(r => { r.style.display = open ? "none" : ""; });
       });
       trs.push(head, ...children);
@@ -1020,12 +1032,12 @@ async function home(body, toast) {
   const domains = [...new Set(entities.map(e => e.domain))].sort();
 
   let domainFilter = "";
-  const select = el("select", { class: "search", style: "min-width:150px" },
+  const select = el("select", { class: "search", style: "min-width:150px", "aria-label": "domain" },
     el("option", { value: "" }, "all domains"),
     ...domains.map(d => el("option", { value: d }, `${d} (${entities.filter(e => e.domain === d).length})`)));
   select.addEventListener("change", () => { domainFilter = select.value; apply(); });
 
-  const input = el("input", { class: "search", type: "text", placeholder: "filter entities…" });
+  const input = el("input", { class: "search", type: "text", placeholder: "filter entities…", "aria-label": "filter entities" });
   let q = "";
   input.addEventListener("input", debounce(() => { q = input.value.toLowerCase(); apply(); }, 150));
 
@@ -1475,7 +1487,7 @@ function monitorForm(toast) {
   const type = el("select", { class: "search", style: "min-width:170px" },
     ...MONITOR_TYPES.map(t => el("option", { value: t.value }, t.label)));
   const keywordField = el("div", { class: "field", style: "display:none" },
-    el("label", {}, "KEYWORD"), keyword);
+    labelFor(keyword, "KEYWORD"), keyword);
   const tlsField = el("label", { class: "check" }, tls, "verify TLS certificate (off for self-signed)");
   type.addEventListener("change", () => {
     const t = MONITOR_TYPES.find(x => x.value === type.value);
@@ -1504,9 +1516,9 @@ function monitorForm(toast) {
   return el("div", { class: "panel accent", style: "margin-bottom:14px" },
     el("div", { class: "panel-title" }, "ADD MONITOR"),
     el("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:0 18px" },
-      el("div", { class: "field" }, el("label", {}, "NAME"), name),
-      el("div", { class: "field" }, el("label", {}, "CHECK TYPE"), type),
-      el("div", { class: "field" }, el("label", {}, "TARGET"), target, hint),
+      el("div", { class: "field" }, labelFor(name, "NAME"), name),
+      el("div", { class: "field" }, labelFor(type, "CHECK TYPE"), type),
+      el("div", { class: "field" }, labelFor(target, "TARGET"), target, hint),
       keywordField),
     tlsField,
     el("div", { class: "setup-actions" }, saveBtn),
@@ -1560,10 +1572,10 @@ async function reports(body, toast) {
   // ---- schedule panel
   const enabled = el("input", { type: "checkbox" });
   enabled.checked = cfg.enabled === true;
-  const day = el("select", { class: "search" },
+  const day = el("select", { class: "search", "aria-label": "day of the week" },
     ...DAY_NAMES.map((d, i) => el("option", { value: String(i) }, d)));
   day.value = String(cfg.day ?? 0);
-  const hour = el("select", { class: "search" },
+  const hour = el("select", { class: "search", "aria-label": "hour" },
     ...Array.from({ length: 24 }, (_, h) => el("option", { value: String(h) }, `${String(h).padStart(2, "0")}:00`)));
   hour.value = String(cfg.hour ?? 8);
 
@@ -1631,15 +1643,16 @@ async function reports(body, toast) {
 function reportPanel(r, expanded) {
   const when = new Date(r.ts * 1000).toLocaleString([], { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
   const content = el("div", { style: expanded ? "" : "display:none" }, ...reportBody(r));
-  const head = el("div", { class: "panel-title", style: "cursor:pointer" },
+  const head = pressable(el("div", { class: "panel-title", style: "cursor:pointer" },
     el("span", { class: `grade-badge grade-${r.grade}`, style: "font-size:12px;padding:2px 8px;margin-right:8px" }, r.grade),
     `HEALTH REPORT — ${when.toUpperCase()}`,
     el("span", { class: "pill neutral", style: "margin-left:8px" }, (r.trigger || "manual").toUpperCase()),
-    el("span", { class: "mono-dim", style: "margin-left:auto" }, expanded ? "▾" : "▸"));
+    el("span", { class: "mono-dim", style: "margin-left:auto" }, expanded ? "▾" : "▸")), { expanded: !!expanded });
   head.addEventListener("click", () => {
     const hidden = content.style.display === "none";
     content.style.display = hidden ? "" : "none";
     head.lastChild.textContent = hidden ? "▾" : "▸";
+    head.setAttribute("aria-expanded", String(hidden));
   });
   return el("div", { class: "panel" }, head, content);
 }

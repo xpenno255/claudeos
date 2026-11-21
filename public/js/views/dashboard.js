@@ -248,14 +248,18 @@ function tiles(overview, history, attention) {
     // on the strip says so, by glyph and count as well as by colour.
     const flagged = attention.filter(i => i.system === sys.id && i.severity !== "info").length;
     const warn = st?.ok === true && flagged > 0;
-    const tile = el("div", {
+    // A link, not a clickable div (#87): Tab reaches it, Enter follows it, and
+    // it is announced as going somewhere. The LED's state is also a word,
+    // the same word the rail uses, so it is not carried by colour alone.
+    const word = !configured ? "NOT LINKED" : asleep ? "SCHEDULED OFF"
+      : warn ? "WARN" : st?.ok === true ? "UP" : st?.ok === false ? "DOWN" : "—";
+    const tile = el("a", {
       class: `panel tile ${configured ? "" : "tile-unconfigured"} ${warn ? "tile-warn" : ""}`,
-      onclick: () => { location.hash = configured ? `#/ops/${sys.tab}` : "#/setup"; },
+      href: configured ? `#/ops/${sys.tab}` : "#/setup",
     },
       el("div", { class: "tile-head" }, statusLed(st, warn), el("span", { class: "tile-name" }, sys.label),
         warn ? el("span", { class: "tile-flag", title: "see Needs Attention above" }, `▲ ${flagged}`) : null,
-        el("span", { class: "mono-dim" },
-          configured ? (asleep ? "SCHEDULED OFF" : "") : "NOT LINKED")),
+        el("span", { class: "mono-dim" }, word)),
       el("div", { class: "tile-big" }, configured ? big : "···", " ",
         el("small", {}, configured ? unit : "configure in setup")),
       el("div", { class: "tile-sub" },
