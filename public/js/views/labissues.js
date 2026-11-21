@@ -14,7 +14,7 @@
 // those four gets a different colour, a different glyph and a different word.
 
 import { api } from "../api.js";
-import { el, timeAgo, clockTime } from "../util.js";
+import { el, timeAgo, clockTime, pressable } from "../util.js";
 
 const REFRESH_MS = 30000;          // the server sweeps every 60 s
 
@@ -642,11 +642,12 @@ function machineBlock(v) {
     class: "mono-dim",
     style: "display:none;white-space:pre-wrap;font-size:11px;margin:8px 0 0",
   }, JSON.stringify(v, null, 1));
-  const head = el("div", { class: "mono-dim", style: "cursor:pointer;margin-top:12px" },
-    "▸ THE MACHINE BLOCK");
+  const head = pressable(el("div", { class: "mono-dim", style: "cursor:pointer;margin-top:12px" },
+    "▸ THE MACHINE BLOCK"), { expanded: false });
   head.addEventListener("click", () => {
     const hidden = content.style.display === "none";
     content.style.display = hidden ? "" : "none";
+    head.setAttribute("aria-expanded", String(hidden));
     head.textContent = hidden ? "▾ THE MACHINE BLOCK" : "▸ THE MACHINE BLOCK";
   });
   return el("div", {}, head, content);
