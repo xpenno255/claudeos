@@ -68,6 +68,9 @@ across all of them:
                 self-signed certificates, and defaulting to strict would mean
                 every install starts broken.
 
+One more is read by the poller rather than by any connector: `down_after_min`,
+how long this system may fail before it is DOWN (`app/outage.py`).
+
 The rest is per-system and named by whatever that system calls it
 (`token_secret` for Proxmox, `bot_token` for Telegram); `store.SECRET_FIELDS`
 is the list of which of those are secret.
@@ -104,4 +107,13 @@ CONNECTORS = {
     "docker": docker,
     "homeassistant": homeassistant,
     "synology": synology,
+}
+
+# The hash route each connector's operations tab lives at: the same mapping as
+# `public/js/meta.js`, which the server cannot import. Here rather than with
+# either reader, because the attention strip and the poller's alerts both link
+# to it and neither should import the other for a dict.
+TABS = {
+    "unifi": "#/ops/network", "proxmox": "#/ops/compute", "docker": "#/ops/containers",
+    "homeassistant": "#/ops/home", "synology": "#/ops/nas",
 }

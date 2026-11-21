@@ -27,16 +27,10 @@ from collections import namedtuple
 
 from . import backups, labissues, monitors, notify, oplog, poller, registry, reports, smart, store
 from .connectors import CONNECTORS
+from .connectors import TABS as CONNECTOR_TABS
 
 SEVERITIES = ("critical", "warn", "info")
 _ORDER = {s: i for i, s in enumerate(SEVERITIES)}
-
-# The hash route each connector's operations tab lives at — the same mapping
-# as `public/js/meta.js`, which the server cannot import.
-CONNECTOR_TABS = {
-    "unifi": "#/ops/network", "proxmox": "#/ops/compute", "docker": "#/ops/containers",
-    "homeassistant": "#/ops/home", "synology": "#/ops/nas",
-}
 
 # Fullness thresholds for volumes and root disks. Higher than the meters' amber
 # (75%), which colours a bar; this interrupts somebody, and a homelab disk at

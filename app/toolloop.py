@@ -26,15 +26,15 @@ Ops Chat serialises them to SSE; a headless caller ignores the ones it does not
 need. The two terminal events (`finished`, `suspended`) always carry the run's
 accounting, including on the error path — spend that happened must be recorded.
 
-A run ends in one of three ways. Tools are always withheld on the final call, so
-the model cannot ask for something we would have to refuse. Without
+A run ends in one of three ways. Tool use is always forbidden on the final call
+(`tool_choice: none`, with the tool list still sent so the request's prefix does
+not change), so the model cannot ask for something we would have to refuse. Without
 `final_schema` that call answers in prose, which is what Ops Chat wants. With
 one, it answers as schema-validated JSON instead — the third ending, added for
 triage, where the caller needs data with prose as one field rather than prose it
 would have to parse.
 """
 
-import datetime
 import json
 import time
 
@@ -47,10 +47,10 @@ except ImportError:  # plain system python — the agentic loop is unavailable
     anthropic = None
     HAS_SDK = False
 
-MODEL = "claude-sonnet-5"
+MODEL = "claude-opus-5-5"
 EFFORT = "medium"              # low | medium | high | xhigh | max
 MAX_TOKENS = 16000             # caps thinking + text together
-MAX_ITERATIONS = 15            # tools withheld on the final one
+MAX_ITERATIONS = 15            # tool use forbidden on the final one
 CONTEXT_BUDGET = 120_000       # input tokens one run may accumulate
 CONTEXT_FULL_AT = 0.8          # fraction of the budget at which a run stops
 
@@ -95,25 +95,32 @@ Tool results carry a status. `success` has data. `no_data` means the query worke
 FINAL_PROMPT = ("Now give your result in the required structured format. "
                 "Do not call any more tools.")
 
-# Sonnet 5 list price is $3/$15 per MTok, with introductory $2/$10 running to
-# 2026-08-31. Cache writes bill 1.25x input, reads 0.1x.
-_INTRO_UNTIL = datetime.date(2026, 8, 31)
-_PRICES = {"intro": (2.0, 10.0), "list": (3.0, 15.0)}
-
-
 # --------------------------------------------------------------- pricing
 
-def _rate() -> tuple:
-    return _PRICES["intro" if datetime.date.today() <= _INTRO_UNTIL else "list"]
+# claude-opus-5-5, per million tokens, checked 2026-11-21 against
+# platform.claude.com/docs/en/about-claude/pricing: $4 in, $20 out. A cache write
+# (the 5-minute kind `system_blocks` asks for) bills 1.25x input. A cache read
+# bills 0.05x on this model, not the 0.1x of the models before it; every loop
+# iteration re-reads the cached prefix, so that multiplier is most of a long
+# run's input bill and the old one would have doubled it on paper.
+#
+# This replaces a dated switch that moved Sonnet 5 from $2/$10 to $3/$15 on
+# 2026-09-01. That rise was cancelled, so the switch over-reported every run
+# after that date by half, and the triage budget, which is counted in these
+# dollars, was stopping early. A price that changes on a date belongs in a
+# comment somebody re-checks, not in a branch nobody does.
+USD_PER_MTOK = (4.0, 20.0)
+CACHE_WRITE_X = 1.25
+CACHE_READ_X = 0.05
 
 
 def cost(usage) -> float:
-    inp, out = _rate()
+    inp, out = USD_PER_MTOK
     fresh = getattr(usage, "input_tokens", 0) or 0
     cw = getattr(usage, "cache_creation_input_tokens", 0) or 0
     cr = getattr(usage, "cache_read_input_tokens", 0) or 0
     otok = getattr(usage, "output_tokens", 0) or 0
-    return ((fresh + cw * 1.25 + cr * 0.1) * inp + otok * out) / 1_000_000
+    return ((fresh + cw * CACHE_WRITE_X + cr * CACHE_READ_X) * inp + otok * out) / 1_000_000
 
 
 def prompt_tokens(usage) -> int:
@@ -166,7 +173,7 @@ def blocks(reply) -> list:
     Callers persist the messages list as JSON, and the SDK's block objects are
     not JSON-serialisable. Dumping to plain dicts keeps the list both storable
     and valid to send straight back — which matters for thinking blocks, which
-    must be echoed back unchanged (their text is empty on Sonnet 5, where
+    must be echoed back unchanged (their text is empty on this model, where
     `display` defaults to omitted, but the block itself is load-bearing).
     """
     out = []
@@ -241,11 +248,21 @@ def run(client, messages: list, *, schemas: list, system: list,
             "thinking": {"type": "adaptive"},
             "output_config": {"effort": effort},
         }
-        # Tools are withheld on the final iteration so the run ends in prose
-        # rather than a tool call we would have to refuse.
-        if not last_step:
+        # The tool list is sent on every call, the final one included, and the
+        # final one forbids their use with `tool_choice`. It used to leave the
+        # list out instead, which is the same promise to the caller (the run
+        # ends in prose, never in a tool call we would have to refuse) but
+        # changes the request's prefix. This model signs each thinking block
+        # against the system prompt, the tool list and the messages before it,
+        # and on accounts where that is enforced a replayed block whose tool
+        # list has vanished is a 400 — on the last call of a run that has
+        # already been paid for. Keeping the list also keeps the cached prefix,
+        # which the old shape threw away on the one call guaranteed to happen.
+        if schemas:
             kwargs["tools"] = schemas
-        elif final_schema is not None:
+            if last_step:
+                kwargs["tool_choice"] = {"type": "none"}
+        if last_step and final_schema is not None:
             kwargs["output_config"]["format"] = {"type": "json_schema",
                                                  "schema": final_schema}
 

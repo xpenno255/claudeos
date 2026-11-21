@@ -1,8 +1,8 @@
 """Alert latches that survive a restart: what each subject was last alerted as.
 
 Every alerting module in this app alerts on a *transition*, which means it has
-to remember the state it last announced. The poller, SMART, the uptime monitors
-and the registry used to remember it in module globals, and every deploy is a
+to remember the state it last announced. The poller, SMART and the uptime
+monitors used to remember it in module globals, and every deploy is a
 restart, so every deploy forgot (#73):
 
 * a system already down at boot never alerted, because there was no previous
@@ -26,12 +26,14 @@ The file is `alerts.json` in the data directory::
     {
       "poller":   {"homeassistant": {"state": "down", "since": 1763661811.2}},
       "smart":    {"pve:/dev/sda": {"state": "fail", "since": 1763661900.0}},
-      "monitor":  {"a1b2c3d4": {"state": "down", "since": 1763662000.5}},
-      "registry": {"lscr.io/linuxserver/plex:latest": {"state": "update", "since": 1763662100.0}}
+      "monitor":  {"a1b2c3d4": {"state": "down", "since": 1763662000.5}}
     }
 
-Namespace, then subject, then the state last alerted and when. `since` is for a
-human reading the file; nothing decides on it.
+Namespace, then subject, then the state last alerted and `since`: when the
+alerted condition began, which for an outage is its first failed check rather
+than the moment the alert went out. Nothing decides on `since`. It is there so a
+recovery can say how long the outage lasted, including one that started before
+a restart.
 
 The path is resolved on every call, never bound at import. `store.DATA_DIR` is
 rebound when the data directory is redirected, and a path copied out of it at
@@ -114,16 +116,27 @@ def entries(namespace: str) -> dict:
         return {k: v.get("state") for k, v in subjects.items() if isinstance(v, dict)}
 
 
-def claim(namespace: str, subject: str, state: str | None):
+def since(namespace: str, subject: str) -> float | None:
+    """When the latched condition for `subject` began, or None if none is."""
+    with _lock:
+        entry = _latches(path()).get(namespace, {}).get(subject)
+    try:
+        return float(entry["since"]) if isinstance(entry, dict) else None
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def claim(namespace: str, subject: str, state: str | None, since: float | None = None):
     """Move `subject`'s latch to `state`, and say whether this call moved it.
 
     Returns the previous state (None if nothing was latched) when this call is
     the one that changed it, and `NO_CHANGE` when `state` was already latched.
     `state=None` clears the latch: the subject is back to rest and owes nothing.
+    `since` is when the condition began, if the caller knows better than "now".
 
     Read, decide and write happen in one lock acquisition, for the reason
-    `backups._claim_transition` gives: the poller, SMART and the registry each
-    run on a background sweeper *and* on demand from a route, and two threads
+    `backups._claim_transition` gives: the poller and SMART each run on a
+    background sweeper *and* on demand from a route, and two threads
     deciding from the same stale latch would both send.
     """
     with _lock:
@@ -139,7 +152,7 @@ def claim(namespace: str, subject: str, state: str | None):
             if not subjects:
                 d.pop(namespace, None)
         else:
-            d.setdefault(namespace, subjects)[subject] = {"state": state,
-                                                          "since": time.time()}
+            d.setdefault(namespace, subjects)[subject] = {
+                "state": state, "since": time.time() if since is None else since}
         _write(p, d)
         return prev

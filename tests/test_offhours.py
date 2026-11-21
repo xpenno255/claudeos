@@ -158,10 +158,16 @@ class PollerTest(unittest.TestCase):
         for p in self.patches:
             p.stop()
 
-    def poll_at(self, state, alive=False):
+    # The wait before DOWN is a duration (`outage.DOWN_AFTER_S`), so the poller
+    # is handed its clock. Polls are 30s apart unless a test says otherwise.
+    clock = 1_700_000_000.0
+    WAIT = poller.outage.DOWN_AFTER_S
+
+    def poll_at(self, state, alive=False, after=30):
         _Connector.alive = alive
+        self.clock += after
         with mock.patch.object(poller.offhours, "status", lambda s, now=None: state):
-            poller.poll_once()
+            poller.poll_once(now=self.clock)
         return poller._latest["synology"]
 
     ASLEEP = {"in_window": True, "in_grace": False, "tolerated": True,
@@ -188,19 +194,30 @@ class PollerTest(unittest.TestCase):
         self.poll_at(self.ASLEEP)
         self.assertEqual(self.sent, [])
 
-        st = self.poll_at(self.EXPIRED)
+        # The first poll past the grace, eight hours on. It has been unreachable
+        # all night, so it owes no further wait: the time asleep counts.
+        st = self.poll_at(self.EXPIRED, after=8 * 3600)
         self.assertFalse(st["ok"])
         self.assertEqual(len(self.sent), 1, "failure to wake must alert")
         title, msg, kw = self.sent[0]
-        self.assertIn("DOWN", title)
+        self.assertEqual(title, "SYNOLOGY NAS · down")
         self.assertIn("did not come back", msg)
         self.assertEqual(kw.get("priority"), "high", "as loud as any other outage")
 
     def test_it_does_not_alert_twice_for_the_same_failure(self):
         self.poll_at(self.ASLEEP)
-        self.poll_at(self.EXPIRED)
+        self.poll_at(self.EXPIRED, after=8 * 3600)
         self.poll_at(self.EXPIRED)
         self.assertEqual(len(self.sent), 1, "one alert per transition, not per poll")
+
+    def test_waking_on_time_is_not_counted_as_a_blip(self):
+        """The weekly update counts failures that ended before they paged. A NAS
+        that slept on schedule failed at nothing, and a line saying it blipped
+        seven times this week would be the nightly false alarm in a new place."""
+        self.poll_at(self.ASLEEP)
+        self.poll_at(self.ASLEEP, alive=True, after=8 * 3600)
+        self.assertEqual(self.sent, [])
+        self.assertEqual(poller.outage.blips(0), {})
 
     # ------------------------------------------- on when it needn't be is fine
 
@@ -227,19 +244,20 @@ class PollerTest(unittest.TestCase):
         is a possible fault, and the window must not have dulled that."""
         self.poll_at(self.EXPIRED, alive=True)
         self.poll_at(self.EXPIRED)
-        st = self.poll_at(self.EXPIRED)
+        self.assertEqual(self.sent, [], "not yet an outage")
+        st = self.poll_at(self.EXPIRED, after=self.WAIT)
         self.assertFalse(st["ok"])
-        self.assertEqual(len(self.sent), 1, "two failed polls, as for any outage")
+        self.assertEqual(len(self.sent), 1, "the same wait as for any outage")
         self.assertEqual(self.sent[0][2].get("priority"), "high")
 
     def test_with_no_window_the_ordinary_down_path_is_unchanged(self):
-        """No window is the ordinary path: one failed poll is a blip, the second
-        is an outage (#72), even for a system that was already down when
-        ClaudeOS started and so was never seen up (#73)."""
+        """No window is the ordinary path: a failure shorter than the wait is a
+        blip and one that outlasts it is an outage, even for a system that was
+        already down when ClaudeOS started and so was never seen up (#73)."""
         st = self.poll_at(None)
         self.assertFalse(st["ok"])
         self.assertEqual(self.sent, [], "one failed poll is not an outage")
-        self.poll_at(None)
+        self.poll_at(None, after=self.WAIT)
         self.assertEqual(len(self.sent), 1)
         self.assertNotIn("did not come back", self.sent[0][1])
 

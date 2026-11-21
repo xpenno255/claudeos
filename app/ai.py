@@ -25,7 +25,14 @@ except ImportError:
     HAS_SDK = False
 
 API_URL = "https://api.anthropic.com/v1/messages"
-MODEL = "claude-opus-5"
+MODEL = "claude-opus-5-5"
+# Sent on every call rather than left to the API. It used to be left: on
+# claude-opus-5 an omitted effort meant `high`. On this model it means `medium`,
+# so the same code would have changed what it asked for without a line of it
+# changing. `medium` is that default written down, and it is what the model's
+# own guidance starts from. One value for all four analyses; why they are not
+# tuned apart is in .out-of-scope/per-caller-reasoning-effort.md.
+EFFORT = "medium"
 API_VERSION = "2023-06-01"
 TIMEOUT = 540  # Opus with adaptive thinking can take minutes on big logs
 
@@ -138,7 +145,8 @@ def _sdk_ask_json(key: str, system_prompt: str, user_text: str, schema: dict,
             max_tokens=max_tokens,
             system=system_prompt,
             thinking={"type": "adaptive"},
-            output_config={"format": {"type": "json_schema", "schema": schema}},
+            output_config={"effort": EFFORT,
+                           "format": {"type": "json_schema", "schema": schema}},
             messages=[{"role": "user", "content": user_text}],
         )
     except anthropic.AuthenticationError as e:
@@ -193,7 +201,8 @@ def _raw_ask_json(key: str, system_prompt: str, user_text: str, schema: dict,
         "max_tokens": max_tokens,
         "system": system_prompt,
         "thinking": {"type": "adaptive"},
-        "output_config": {"format": {"type": "json_schema", "schema": schema}},
+        "output_config": {"effort": EFFORT,
+                          "format": {"type": "json_schema", "schema": schema}},
         "messages": [{"role": "user", "content": user_text}],
     }
     try:
@@ -376,15 +385,16 @@ Rules:
 
 
 def analyze_health(data: dict) -> dict:
-    # 10k is sized for the API's default reasoning effort, which is what this
-    # call runs at. Thinking and response share this budget, so raising effort
-    # without raising this truncates the report — and a truncated *scheduled*
-    # report raises, which retries three times before giving up (#27). Guidance
-    # for the top effort levels is 64k. See
-    # .out-of-scope/per-caller-reasoning-effort.md for why it is left alone.
+    # Thinking and response share this budget, and on this model thinking cannot
+    # be switched off, so a cap sized for the response alone truncates the report
+    # — and a truncated *scheduled* report raises, which retries three times
+    # before giving up (#27). 16k is headroom at `medium`, not a target: it is a
+    # ceiling, and tokens not generated are not billed. It is also about the most
+    # a non-streaming call should ask for. Raising EFFORT past `high` needs this
+    # raised with it (guidance for the top levels is 64k, which means streaming).
     user = ("Weekly homelab snapshot:\n"
             f"```json\n{json.dumps(data, indent=1)[:120000]}\n```")
-    return ask_json(REPORT_SYSTEM_PROMPT, user, REPORT_SCHEMA, max_tokens=10000)
+    return ask_json(REPORT_SYSTEM_PROMPT, user, REPORT_SCHEMA, max_tokens=16000)
 
 
 EVENT_SYSTEM_PROMPT = """You are a network security analyst triaging a single event from a UniFi

@@ -79,12 +79,34 @@ def _send_webhook(s, title, message, priority, tags):
     }, verify_tls=s.get("verify_tls", False))
 
 
+# Telegram has no title field and no priority, so a failing disk and a routine
+# note used to arrive looking and sounding the same. The marker says which it
+# is, and the same marker always means the same thing: a tag that names what
+# the message *is* wins, and anything else is coloured by how urgent it is.
+_TELEGRAM_TAG_MARKERS = (("white_check_mark", "✅"), ("package", "📦"),
+                         ("clipboard", "📋"), ("wrench", "🔧"))
+_TELEGRAM_PRIORITY_MARKERS = {"urgent": "🚨", "high": "🔴", "default": "🟠", "low": "ℹ️"}
+# Delivered without a sound. `high` and `urgent` are the only two that are
+# allowed to make the phone buzz, which is what keeps a buzz meaning something.
+TELEGRAM_SILENT = ("low", "default")
+
+
+def _telegram_marker(priority, tags) -> str:
+    for tag, marker in _TELEGRAM_TAG_MARKERS:
+        if tag in (tags or ()):
+            return marker
+    return _TELEGRAM_PRIORITY_MARKERS.get(priority, "🟠")
+
+
 def _send_telegram(s, title, message, priority, tags):
     request("POST", f"https://api.telegram.org/bot{s['bot_token']}/sendMessage",
-            # Previews off: alert text can carry a URL from an unauthenticated
-            # source (a heartbeat's own report, model prose), and a preview has
-            # Telegram's servers fetch it with no click (ADR-0002, amended).
-            json_body={"chat_id": s["chat_id"], "text": f"{title}\n{message}",
+            # Plain text, no parse mode: the body can carry a heartbeat's own
+            # report or model prose, and one stray `_` must not get an alert
+            # rejected. Previews off for the same reason: a preview has
+            # Telegram's servers fetch a URL with no click (ADR-0002, amended).
+            json_body={"chat_id": s["chat_id"],
+                       "text": f"{_telegram_marker(priority, tags)} {title}\n{message}",
+                       "disable_notification": priority in TELEGRAM_SILENT,
                        "link_preview_options": {"is_disabled": True}},
             verify_tls=True)
 
@@ -158,13 +180,33 @@ def state() -> dict:
     }
 
 
+def link_to(route: str | None) -> str | None:
+    """The address of a page of this app, or None if nobody has said where it is.
+
+    `CLAUDEOS_URL` is the address the owner opens ClaudeOS at from their phone
+    (`https://claudeos.example.org`). There is no fallback: the server knows the
+    port it binds, not the name anybody reaches it by, and a guessed link in an
+    alert is a dead end at the moment somebody most wants to get in.
+    """
+    base = os.environ.get("CLAUDEOS_URL", "").strip().rstrip("/")
+    if not base or not route:
+        return None
+    if not base.startswith(("http://", "https://")):
+        base = "https://" + base
+    return f"{base}/{route.lstrip('/')}"
+
+
 def send(title: str, message: str, priority: str = "default",
          tags: list | None = None, background: bool = True,
-         key: str | None = None) -> None:
+         key: str | None = None, link: str | None = None) -> None:
     """Fan an alert out to every enabled channel. Never raises.
 
     Delivery runs on a daemon thread by default so callers (the poller,
     request handlers) never block on a slow push service.
+
+    `link` is the hash route of the page that shows what the alert is about
+    (`"#/ops/backups"`). It becomes a last line of the message when
+    `CLAUDEOS_URL` is set and is dropped when it is not.
 
     **The mute.** An exact repeat within `COOLDOWN_S` is dropped here, and that
     is what deduplicates the latch-then-notify callers. Each of them records its
@@ -187,6 +229,8 @@ def send(title: str, message: str, priority: str = "default",
     """
     if _muted(title, key, time.time()):
         return
+    if url := link_to(link):
+        message = f"{message}\n→ {url}"
     if background:
         threading.Thread(target=_fan_out, args=(title, message, priority, tags),
                          kwargs={"delays": RETRY_DELAYS_S},

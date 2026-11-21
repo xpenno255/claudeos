@@ -1482,7 +1482,7 @@ async function uptime(body, toast) {
       el("span", { class: `pill ${down ? "err" : up ? "ok" : "neutral"}` },
         down ? `✕ ${down} DOWN` : up ? `● ALL ${up} UP` : "NO MONITORS"),
       paused ? el("span", { class: "pill neutral" }, `${paused} PAUSED`) : null,
-      el("span", { class: "mono-dim" }, "checked every 30 s · alerts after 2 consecutive failures"),
+      el("span", { class: "mono-dim" }, "checked every 30 s · alerts once down for 5 minutes, or the monitor's own wait"),
       el("div", { class: "spacer" }),
       monitors.length ? checkBtn : null, addBtn),
     form,
@@ -1537,6 +1537,7 @@ function monitorForm(toast) {
   const name = el("input", { type: "text", placeholder: "Jellyfin" });
   const target = el("input", { type: "text", placeholder: MONITOR_TYPES[0].placeholder });
   const keyword = el("input", { type: "text", placeholder: "healthy" });
+  const downAfter = el("input", { type: "text", placeholder: "5", inputmode: "decimal" });
   const tls = el("input", { type: "checkbox" });
   const hint = el("div", { class: "hint" }, MONITOR_TYPES[0].hint);
 
@@ -1560,6 +1561,7 @@ function monitorForm(toast) {
       await api.monitorCreate({
         name: name.value.trim(), type: type.value, target: target.value.trim(),
         keyword: keyword.value.trim(), verify_tls: tls.checked,
+        down_after_min: downAfter.value.trim(),
       });
       toast(`monitoring ${name.value.trim()}`, "ok", "MONITOR ADDED");
       setTimeout(() => location.reload(), 700);
@@ -1575,7 +1577,9 @@ function monitorForm(toast) {
       el("div", { class: "field" }, labelFor(name, "NAME"), name),
       el("div", { class: "field" }, labelFor(type, "CHECK TYPE"), type),
       el("div", { class: "field" }, labelFor(target, "TARGET"), target, hint),
-      keywordField),
+      keywordField,
+      el("div", { class: "field" }, labelFor(downAfter, "DOWN AFTER (MIN) — OPTIONAL"), downAfter,
+        el("div", { class: "hint" }, "how long it may fail before you are alerted; blank is 5 minutes"))),
     tlsField,
     el("div", { class: "setup-actions" }, saveBtn),
     result);
@@ -1660,7 +1664,7 @@ async function reports(body, toast) {
   enabled.checked = cfg.enabled === true;
   const day = el("select", { class: "search", "aria-label": "day of the week" },
     ...DAY_NAMES.map((d, i) => el("option", { value: String(i) }, d)));
-  day.value = String(cfg.day ?? 0);
+  day.value = String(cfg.day ?? 5);
   const hour = el("select", { class: "search", "aria-label": "hour" },
     ...Array.from({ length: 24 }, (_, h) => el("option", { value: String(h) }, `${String(h).padStart(2, "0")}:00`)));
   hour.value = String(cfg.hour ?? 8);
@@ -1669,7 +1673,8 @@ async function reports(body, toast) {
   saveBtn.addEventListener("click", async () => {
     try {
       await api.reportConfig({ enabled: enabled.checked, day: +day.value, hour: +hour.value });
-      toast(enabled.checked ? `weekly report: ${DAY_NAMES[+day.value]} ${hour.value.padStart(2, "0")}:00` : "schedule disabled", "ok", "REPORTS");
+      const when = `${DAY_NAMES[+day.value]} ${hour.value.padStart(2, "0")}:00`;
+      toast(enabled.checked ? `weekly report: ${when}` : `AI report off — weekly update still sent ${when}`, "ok", "REPORTS");
     } catch (e) {
       toast(String(e.message || e), "err", "REPORTS");
     }
@@ -1707,6 +1712,9 @@ async function reports(body, toast) {
       el("label", { class: "check", style: "margin:0" }, enabled, "run weekly on"),
       day, el("span", { class: "mono-dim" }, "at"), hour,
       saveBtn, el("div", { class: "spacer" }), runBtn),
+    el("div", { class: "mono-dim", style: "margin-top:10px" },
+      "The weekly update goes out at this time whether or not the AI report is on: how many container updates are waiting, ",
+      "and which systems had short outages that were not worth an alert. With the report on, it is the last lines of the report's message."),
     el("div", { class: "section-gap" }),
     out);
 

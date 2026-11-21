@@ -13,6 +13,12 @@ Optional Docker Hub / GHCR credentials (Setup → Container Registries)
 are passed as Basic auth to the token endpoint — higher rate limits and
 private repos. Locally-built and digest-pinned images have nothing to
 compare and are reported as "local".
+
+**Nothing here notifies.** An update used to be pushed the moment it was seen,
+one message per image, and nobody installs an update because a phone buzzed at
+00:50: over five days that was seven messages and 22 updates left waiting. What
+is waiting is a count on the dashboard at any time and one line of the weekly
+update (`reports.weekly_lines`), which reads the cache below.
 """
 
 import base64
@@ -21,7 +27,7 @@ import threading
 import time
 import urllib.parse
 
-from . import alertstate, notify, oplog, store, sweeper
+from . import alertstate, oplog, store, sweeper
 from .connectors import docker
 from .httpclient import HttpError, request
 
@@ -122,7 +128,7 @@ def _local_digests(settings: dict) -> dict:
     return out
 
 
-def sweep(alert: bool = True) -> list:
+def sweep() -> list:
     s = store.get_system("docker", reveal_secrets=True)
     if not s or not s.get("host"):
         with _lock:
@@ -161,23 +167,12 @@ def sweep(alert: bool = True) -> list:
     with _lock:
         _cache.update(images=images, ts=time.time(), error=None)
 
-    # Which refs were already announced is an `alertstate` latch, so a restart
-    # does not announce every pending update a second time.
-    updates = [i["ref"] for i in images if i["status"] == "update"]
+    # Updates were once announced as they appeared, with an `alertstate` latch
+    # per image so a restart did not announce them twice. Nothing is announced
+    # now, and that file is meant to hold only what somebody is still owed, so
+    # whatever an older version left there is cleared.
     for ref in alertstate.entries("registry"):
-        if ref not in updates:
-            alertstate.claim("registry", ref, None)  # applied: forget it
-    fresh = ([ref for ref in updates
-              if alertstate.claim("registry", ref, "update") is not alertstate.NO_CHANGE]
-             if alert else [])
-    if fresh:
-        oplog.add("info", "registry", f"image updates available: {', '.join(fresh)}")
-        # The subject is this set of images: two different sets can share a
-        # title ("1 container image update available") and must not mute.
-        notify.send(
-            f"{len(fresh)} container image update{'s' if len(fresh) > 1 else ''} available",
-            ", ".join(fresh)[:800], priority="default", tags=["package"],
-            key="registry:" + ",".join(sorted(fresh)))
+        alertstate.claim("registry", ref, None)
     return images
 
 

@@ -24,6 +24,7 @@ from . import alertstate, notify, oplog, store, sweeper
 from .connectors import proxmox
 
 SWEEP_INTERVAL = 6 * 3600
+TAB = "#/ops/compute"
 TEMP_WARN = 70  # °C — NVMe throttle/damage territory; ATA drives run cooler
 
 _lock = threading.Lock()
@@ -162,15 +163,15 @@ def sweep(alert: bool = True) -> list:
         label = f"{d['devpath']} ({d['model']}) on {d['node']}"
         if d["status"] != "ok":
             oplog.add("warn", "smart", f"disk {d['status']}: {label} — {'; '.join(d['issues'])}")
-            notify.send(f"Disk {d['status'].upper()}: {d['devpath']} on {d['node']}",
+            notify.send(f"DISK · {d['devpath']} on {d['node']} · {d['status']}",
                         f"{d['model']}: {'; '.join(d['issues'])}",
                         priority="urgent" if d["status"] == "fail" else "high",
-                        tags=["floppy_disk"], key=key)
+                        tags=["floppy_disk"], key=key, link=TAB)
         else:
             oplog.add("info", "smart", f"disk recovered: {label}")
-            notify.send(f"Disk recovered: {d['devpath']} on {d['node']}",
+            notify.send(f"DISK · {d['devpath']} on {d['node']} · ok again",
                         f"{d['model']}: SMART status back to ok",
-                        priority="default", tags=["white_check_mark"], key=key)
+                        priority="default", tags=["white_check_mark"], key=key, link=TAB)
     return disks
 
 

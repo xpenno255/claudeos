@@ -12,6 +12,8 @@ services:
       - "8321:8321"
     environment:
       - TZ=Europe/London
+      # the address you open ClaudeOS at; alerts link back to it when set
+      # - CLAUDEOS_URL=https://claudeos.example.org
     volumes:
       - ./data:/data
       # host folders to make scannable from Containers → SCAN buttons

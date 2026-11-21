@@ -52,8 +52,9 @@ caveats noted at the bottom.
   avoided), registry digests via manifest HEAD + generic WWW-Authenticate
   token flow (docker.io/ghcr/lscr verified live). Optional Docker Hub /
   GHCR PATs on Setup → Container Registries (rate limits, private repos).
-  6-hourly sweeps, UPDATE pills on the Containers tab, notify on new
-  updates, feeds the weekly AI report.
+  6-hourly sweeps, UPDATE pills on the Containers tab, a count of what is
+  waiting in the weekly update (no longer a push per image), feeds the weekly
+  AI report.
 - ✅ **Proxmox backup monitoring** *(shipped 2026-07-27, #50)* — became the
   wider **Backups tab**: `app/backups.py` tracks backup *outcomes* rather than
   reachability, with heartbeat jobs (a `curl` line in any script) alongside

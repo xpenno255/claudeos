@@ -34,7 +34,7 @@ the AI features — with automatic retries and typed errors. Plain
 Add an Anthropic API key (console.anthropic.com) on Setup → Claude AI to enable,
 on the Home tab:
 
-- **AI Log Analysis** — sends the HA error log to `claude-opus-5` (the analysis
+- **AI Log Analysis** — sends the HA error log to `claude-opus-5-5` (the analysis
   model, named once in `app/ai.py` and reported by the API alongside every
   result), which deduplicates, ranks and categorises issues and recommends
   concrete fixes.
@@ -86,7 +86,10 @@ unprivileged as UID 1000). Update later with
 
 Configuration env vars: `CLAUDEOS_DATA` (state dir, `/data` in the image),
 `CLAUDEOS_HOST` (bind, `0.0.0.0` in the image), `CLAUDEOS_PORT` (8321), `TZ`,
-and `CLAUDEOS_ALLOWED_HOSTS`. That last one is a comma-separated list of real
+`CLAUDEOS_URL` and `CLAUDEOS_ALLOWED_HOSTS`. `CLAUDEOS_URL` is the address you
+open ClaudeOS at from your phone (`https://claudeos.example.org`); with it set,
+each alert ends with a link to the page it is about, and without it alerts carry
+no link. `CLAUDEOS_ALLOWED_HOSTS` is a comma-separated list of real
 domains you reach ClaudeOS by, such as a reverse proxy's name. IP addresses,
 single-label names (`docker`) and `.lan`, `.local`, `.home`, `.home.arpa`,
 `.localdomain` and
@@ -223,6 +226,7 @@ app/
   poller.py             30s background poll + metric ring buffers
   oplog.py              audit log (memory + data/opslog.jsonl)
   alertstate.py         alert latches that survive a restart (data/alerts.json)
+  outage.py             the wait before DOWN, and short outages counted for the weekly update
   connectors/           unifi · proxmox · docker · homeassistant · synology
 public/                 no-build frontend (ES modules)
 data/                   master key, encrypted config, ops log (created at runtime)

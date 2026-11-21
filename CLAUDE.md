@@ -30,11 +30,19 @@ expensive*. Ten modules clear it.
   week, and the failure that loops is the one that gets billed (#27, ~$870 worst
   case). `generate()` takes its snapshot, its analysis call and its clock as
   arguments so the expensive paths are tested with none of them. The meter earns
-  its own class for a different reason (#60): a wrong *rate* is invisible, and
-  `toolloop._PRICES` is Sonnet's, sits one import away, applies to the same
-  `_usage` shape, and would under-report the app's priciest call by an order of
-  magnitude while looking plausible. One test exists only to assert the two
-  constants differ, because every other test passes if they don't.
+  its own class for a different reason (#60): a wrong *rate* is invisible. The
+  tool loop's rate sits one import away and applies to the same `_usage` shape,
+  and when the loop ran Sonnet it would have under-reported the app's priciest
+  call while looking plausible. Both now run `claude-opus-5-5`, so the two rates
+  are equal on purpose, and one test exists only to hold each rate to its model:
+  equal while the models match, different once they do not, because every other
+  test passes either way. The loop's cache-read discount is pinned beside it,
+  since a tool loop re-reads its cached prefix every iteration and the triage
+  budget is counted in those dollars. And the
+  weekly update, which shares the slot: image updates are announced nowhere else
+  now, so one that never goes out is the feature gone with nothing to show it,
+  and one sent both alone and inside the report is the noise it replaced. The
+  scheduler's `tick` takes its clock.
 - `app/notify.py` — the zero-channel path, and retrying a failed channel. With
   nothing configured, every alert the app raised was discarded and *nothing recorded that it happened*
   (#41), so a failing disk's `urgent` warning spent its whole window in silence.
@@ -46,15 +54,24 @@ expensive*. Ten modules clear it.
   (#72). Muting any identical title for five minutes swallowed a second outage
   inside that window, which the poller then never raised again, so the last
   thing the owner saw was "recovered". The cooldown takes its clock as an argument.
-- `app/alertstate.py` (with the poller and SMART branches that read it) — alert
-  latches across a restart, and the poller's two-poll debounce. Every deploy
+  And one rule about Telegram: routine messages are delivered without a sound,
+  which makes that flag a way to deliver a failing disk in silence. `high` and
+  `urgent` must never carry it. The layout of a message is not tested.
+- `app/alertstate.py` (with the poller and SMART branches that read it, and
+  `app/outage.py`) — alert latches across a restart, and the wait before DOWN.
+  Every deploy
   used to forget what had been alerted (#73): a system down at boot never
   alerted, a DOWN sent just before a restart never got its "recovered", and a
   disk already failing at boot was swept forever and alerted zero times, at the
   priority (`urgent`) whose whole point is a short window. A restart is a module
   reload over the same `CLAUDEOS_DATA`, and Proxmox, the connectors and the
-  notifier are substituted. The debounce is beside it (#72) because one failed
-  poll paging `high` is how an owner learns to ignore "is DOWN".
+  notifier are substituted. The wait is beside it (#72) because paging `high`
+  for a blip is how an owner learns to ignore "is DOWN". It is five minutes, a
+  duration rather than a count of polls, so that an update reboot stays quiet,
+  which makes it another feature built to create silence. What is tested is
+  where the silence stops: a failure that outlasts the wait still pages, once,
+  and one that ends inside it is counted for the weekly update instead of
+  vanishing. `poll_once` takes its clock as an argument.
 - `app/httpclient.py` — URL scrubbing only. Telegram carries its bot token in
   the URL path, so every error built from that URL leaked it to the browser, to
   `data/opslog.jsonl` and — via `recent_warnings` — to the Anthropic API (#45).
