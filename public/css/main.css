@@ -497,7 +497,15 @@ a.attn-row:hover .attn-go { color: var(--amber); }
 }
 .tabs a:hover { color: var(--ink-2); }
 .tabs a.active { color: var(--amber); border-bottom-color: var(--amber); }
-.tabs .tab-dot { width: 7px; height: 7px; border-radius: 50%; }
+.tabs .tab-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-3); }
+/* the worst of what the attention strip flagged for the tab (#86) */
+.tabs .tab-dot.ok    { background: var(--good); }
+.tabs .tab-dot.warn  { background: var(--warning); }
+.tabs .tab-dot.err   { background: var(--critical); }
+.tabs .tab-dot.sleep { background: var(--cyan); opacity: .45; }
+.tabs .tab-count { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0; font-weight: 500; }
+.tabs .tab-count.warn { color: var(--warning); }
+.tabs .tab-count.err  { color: var(--critical); }
 
 .ops-toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
 .ops-toolbar .spacer { flex: 1; }

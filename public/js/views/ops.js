@@ -7,6 +7,7 @@ import { meter, sparkRow, sparkline } from "../charts.js";
 import { SYSTEMS, BY_ID } from "../meta.js";
 import { renderBackups } from "./backups.js";
 import { confirmAction, overflowMenu } from "../guard.js";
+import { tone, stateTone, pillClass, ledClass, worst } from "../severity.js";
 
 const TABS = [
   { tab: "network",    label: "NETWORK",    sys: "unifi" },
@@ -25,17 +26,27 @@ export async function renderOps(root, args, { toast }) {
   // and every connector tab then said "SYSTEM NOT LINKED" (#75). The three
   // tabs that are not one system's still render — they never read it.
   let overviewError = null;
-  const overview = await api.overview().catch(e => {
-    overviewError = e;
-    return { systems: {}, config: {} };
-  });
+  // The attention strip's answer and the monitor list feed the tab badges
+  // only; either failing makes those badges grey, never green (#86).
+  const [overview, attention, monitorList] = await Promise.all([
+    api.overview().catch(e => {
+      overviewError = e;
+      return { systems: {}, config: {} };
+    }),
+    api.attention().catch(() => null),
+    api.monitors().then(r => r.monitors || []).catch(() => null),
+  ]);
 
   const tabs = el("div", { class: "tabs" });
   for (const t of TABS) {
-    const st = overview.systems?.[t.sys];
-    const dotColor = st?.ok === true ? "var(--good)" : st?.ok === false ? "var(--critical)" : "var(--ink-3)";
-    tabs.append(el("a", { href: `#/ops/${t.tab}`, class: t.tab === active ? "active" : "" },
-      el("span", { class: "tab-dot", style: `background:${dotColor}` }), t.label));
+    const s = tabStatus(t, overview, overviewError, attention, monitorList);
+    tabs.append(el("a", { href: `#/ops/${t.tab}`, class: t.tab === active ? "active" : "",
+                          title: s.title },
+      el("span", { class: `tab-dot ${s.dot}` }), t.label,
+      // the dot's state in words too, as the rail and tiles do (#87)
+      el("span", { class: "sr-only" }, `, ${s.dot === "sleep" ? "asleep" : TONE_WORD[s.tone]}`),
+      s.count ? el("span", { class: `tab-count ${pillClass(s.tone)}` },
+        `${s.tone === "critical" ? "✕" : "▲"}${s.count}`) : null));
   }
   root.append(tabs);
 
@@ -60,6 +71,47 @@ export async function renderOps(root, args, { toast }) {
   await renderers[active](body, toast, overview);
 }
 
+// What a tab's dot and badge say (#86). UPTIME, BACKUPS and REPORTS were always
+// grey whatever was inside them, and a connector tab was green whenever its API
+// answered. Now the dot is the worst of what the dashboard's attention strip
+// has flagged for that tab, and the badge is how many: the same items, with
+// the same severities, so the two views cannot disagree. `info` never makes a
+// tab loud, as it never makes the strip loud; on its own it greys the dot
+// rather than letting it vouch for the tab. A check that could not run is
+// grey, never green.
+const TONE_WORD = {
+  critical: "critical", warn: "warning", unknown: "status unknown",
+  info: "nothing to act on", ok: "ok",
+};
+
+function tabStatus(t, overview, overviewError, attention, monitorList) {
+  const items = (attention?.items || []).filter(i => i.tab === `#/ops/${t.tab}`);
+  const loud = items.filter(i => tone(i.severity) !== "info");
+  const say = (tn, why, dot = ledClass(tn)) => ({
+    tone: tn, dot, count: loud.length,
+    title: [why, ...items.map(i => `• ${i.text}`)].filter(Boolean).join("\n"),
+  });
+  const flagged = worst(loud.map(i => i.severity), null);
+
+  if (t.sys) {
+    const st = overview.systems?.[t.sys];
+    if (overviewError) return say("unknown", "link status could not be read");
+    if (!overview.config?.[t.sys]?.configured) return say("unknown", "not linked");
+    if (st?.scheduled_off) return say("info", "asleep on schedule", "sleep");
+    if (st?.ok === false) return say("critical", "unreachable");
+    if (st?.ok !== true) return say("unknown", "not polled yet");
+    // Up, and — like the rail — only as reassuring as the strip can confirm.
+    return say(flagged || "ok", attention ? "" : "up; what needs attention could not be checked");
+  }
+  if (!attention) return say("unknown", "what needs attention could not be checked");
+  if (flagged) return say(flagged, "");
+  if (t.tab === "uptime") {
+    if (monitorList === null) return say("unknown", "the monitor list could not be read");
+    if (!monitorList.some(m => m.enabled !== false)) return say("unknown", "no active monitors");
+  }
+  return items.length ? say("info", "") : say("ok", "nothing flagged");
+}
+
 // ------------------------------------------------------------ helpers
 
 function toolbar(placeholder, onSearch, extra = []) {
@@ -76,10 +128,12 @@ function tableWrap(headers, rows) {
       el("tbody", {}, ...rows)));
 }
 
+// Which states are healthy depends on what is reporting them, so the caller
+// names those; every other state is coloured by the shared map (#86), which is
+// how a NAS volume in `attention` stopped rendering as a neutral grey fact.
 function statePill(state, okStates = ["online", "running", "on", "ok"]) {
   const s = String(state || "?").toLowerCase();
-  const cls = okStates.includes(s) ? "ok" : ["offline", "exited", "stopped", "unavailable", "error", "dead"].includes(s) ? "err" : "neutral";
-  return el("span", { class: `pill ${cls}` }, s.toUpperCase());
+  return el("span", { class: `pill ${pillClass(stateTone(s, okStates))}` }, s.toUpperCase());
 }
 
 // Every action button goes through the one guard (#76): the confirm names the
@@ -323,7 +377,8 @@ function eventsPanel(initial, anomaliesRes, toast) {
 
   function addRows(events) {
     for (const ev of events) {
-      const sevCls = ev.severity === "HIGH" ? "err" : ev.severity === "MEDIUM" ? "warn" : "neutral";
+      // VERY_HIGH and CRITICAL used to fall through to grey, quieter than HIGH
+      const sevCls = pillClass(ev.severity);
       const triageBtn = el("button", { class: "btn btn-mini btn-ghost" }, "◈ TRIAGE");
       const row = el("tr", {},
         el("td", { class: "mono-dim", style: "white-space:nowrap" },
@@ -409,7 +464,8 @@ function anomContent(anomalies) {
 
 function triageCard(r) {
   const lvl = r.threat_level || "?";
-  const cls = ["high", "critical"].includes(lvl) ? "err" : lvl === "medium" ? "warn" : "ok";
+  // A threat level the map does not know is grey, not the green it used to be.
+  const cls = pillClass(lvl);
   return el("div", { class: "finding", style: "margin:4px 0" },
     el("div", { class: "finding-head" },
       el("span", { class: `pill ${cls}` }, `THREAT: ${lvl.toUpperCase()}`),
@@ -662,13 +718,13 @@ function diskPanel(res, toast) {
     }
   });
   title.append(
-    el("span", { class: `pill ${disks.some(d => d.status === "fail") ? "err" : disks.some(d => d.status === "warn") ? "warn" : "ok"}` },
+    el("span", { class: `pill ${pillClass(worst(disks.map(d => d.status)))}` },
       disks.every(d => d.status === "ok") ? "● ALL HEALTHY" : disks.filter(d => d.status !== "ok").length + " NEED ATTENTION"),
     el("span", { class: "mono-dim", style: "margin-left:auto;letter-spacing:0" }, `checked ${checked}`),
     refreshBtn);
 
   const rows = disks.map(d => {
-    const cls = d.status === "fail" ? "err" : d.status === "warn" ? "warn" : "ok";
+    const cls = pillClass(d.status);
     const temp = d.detail?.temperature;
     const wear = d.wearout != null ? `${100 - d.wearout}%` :
       d.detail?.percentage_used != null ? `${d.detail.percentage_used}%` : "—";
@@ -1203,8 +1259,8 @@ function updatesPanel(res) {
 function findingCard(f) {
   return el("div", { class: `finding ${f.severity}` },
     el("div", { class: "finding-head" },
-      el("span", { class: `pill ${f.severity === "critical" ? "err" : f.severity === "info" ? "neutral" : "warn"}` },
-        f.severity.toUpperCase()),
+      el("span", { class: `pill ${pillClass(f.severity)}` },
+        String(f.severity || "unknown").toUpperCase()),
       f.category ? el("span", { class: "pill neutral" }, f.category) : null,
       f.affected && f.affected !== "general" ? el("span", { class: "mono-dim" }, f.affected) : null,
       el("span", { class: "finding-title" }, f.title)),
@@ -1565,9 +1621,39 @@ function spendLine(spend) {
     unmetered);
 }
 
+// How old the newest report is (#86). It was once 115 days old and nothing on
+// this tab said so; the list simply started further back. Graded on the
+// dashboard strip's threshold (attention.REPORT_MAX_AGE_S: a weekly slot plus
+// a day's grace) so this line, the tab's badge and the strip never disagree.
+const REPORT_MAX_AGE_S = 8 * 86400;
+
+function ageWords(s) {
+  if (s < 3600) return `${Math.max(1, Math.floor(s / 60))} MIN`;
+  if (s < 86400) return `${Math.floor(s / 3600)} H`;
+  const d = Math.floor(s / 86400);
+  return `${d} DAY${d === 1 ? "" : "S"}`;
+}
+
+function reportAge(cfg, past) {
+  const stamps = past.map(r => r.ts).filter(t => typeof t === "number");
+  const last = Math.max(0, cfg.last_run || 0, ...stamps);
+  if (!last) return null;  // the empty state below already says there are none
+  const age = Math.max(0, Date.now() / 1000 - last);
+  const old = age > REPORT_MAX_AGE_S;
+  return el("div", { style: "display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px" },
+    el("span", { class: `pill ${old ? "warn" : "ok"}` },
+      `${old ? "▲" : "●"} NEWEST REPORT ${ageWords(age)} OLD`),
+    old ? el("span", { class: "mono-dim", style: "color:var(--warning)" },
+      cfg.enabled
+        ? "Older than a week: the weekly slot has been missed."
+        : "Older than a week, and the weekly schedule is off, so nothing new will arrive on its own.")
+      : null);
+}
+
 async function reports(body, toast) {
   const state = await api.reports();
   const cfg = state.config || {};
+  const ageSlot = el("div", {}, reportAge(cfg, state.reports || []));
 
   // ---- schedule panel
   const enabled = el("input", { type: "checkbox" });
@@ -1600,6 +1686,7 @@ async function reports(body, toast) {
       out.replaceChildren();
       toast(`report generated — grade ${report.grade}`, "ok", "REPORTS");
       list.prepend(reportPanel(report, true), el("div", { class: "section-gap" }));
+      ageSlot.replaceChildren(reportAge(cfg, [report]) || "");
     } catch (e) {
       out.replaceChildren(el("div", { class: "setup-result err" }, `✕ ${e.message}`));
     } finally {
@@ -1610,6 +1697,7 @@ async function reports(body, toast) {
   const schedPanel = el("div", { class: "panel accent" },
     el("div", { class: "panel-title" }, "AI HEALTH REPORT — POWERED BY CLAUDE"),
     scheduleFailure(cfg),
+    ageSlot,
     el("div", { class: "mono-dim", style: "margin-bottom:10px" },
       "A weekly snapshot of the whole lab — gateway health, security events, Proxmox, Docker, HA/ZHA, ",
       "uptime monitors, warnings — digested by Claude into a graded report with ranked findings. ",

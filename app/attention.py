@@ -274,7 +274,12 @@ def _synology(now: float) -> list:
     for v in d.get("volumes") or []:
         name = v.get("name") or v.get("id") or "?"
         if v.get("status") not in ("normal", None):
-            out.append(item("synology", "critical", f"NAS volume {name} is {v['status']}", tab))
+            # `attention` is DSM asking to be looked at, a warning; anything
+            # else (degraded, crashed) has lost redundancy or data. The same
+            # grading as the NAS tab's pill (public/js/severity.js, #86), so
+            # the strip and the tab it links to cannot disagree.
+            sev = "warn" if v["status"] == "attention" else "critical"
+            out.append(item("synology", sev, f"NAS volume {name} is {v['status']}", tab))
         out += _fullness("synology", f"NAS volume {name}", v.get("pct"), tab)
     n = int(d.get("disks_abnormal") or 0)
     if n:
