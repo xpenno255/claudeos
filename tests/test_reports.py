@@ -427,11 +427,14 @@ class MeterTest(unittest.TestCase):
     A retry loop announces itself — the ops log fills up and the bill arrives.
     Mispricing does not. The report is the single most expensive call this app
     makes (one Opus call over a 120k-character snapshot), and it went unmetered
-    entirely until #60. The specific trap that ticket names is reusing
-    `toolloop._PRICES`, which is Sonnet: that constant is right there, one import
-    away, applies to the same `_usage` shape, and produces a number that looks
-    entirely plausible while being roughly an order of magnitude too low. Nothing
-    at runtime would ever contradict it.
+    entirely until #60. The specific trap that ticket names is reusing the tool
+    loop's rate, which was Sonnet's: that constant is right there, one import
+    away, applies to the same `_usage` shape, and produced a number that looked
+    entirely plausible while being far too low. Nothing at runtime would ever
+    contradict it. Since 2026-11-21 both callers run the same model, so the two
+    rates are equal on purpose, and what is guarded is that they stay tied to
+    their models: equal while the models match, and not left equal by accident
+    on the day they stop matching.
 
     So what is pinned here is the arithmetic and the *absence* of a number —
     never the schedule, which the class above owns. `generate()`'s analysis seam
@@ -458,23 +461,45 @@ class MeterTest(unittest.TestCase):
         return self.reports.generate("manual", snapshot=snapshot, analyse=_analyse,
                                      now=1_784_220_000.0)
 
-    def test_a_report_is_priced_at_the_opus_rate_not_the_sonnet_one(self):
-        """The headline. 100k in / 10k out is $0.75 on Opus ($5/$25 per MTok) and
-        $0.40 on Sonnet's introductory rate — so the wrong constant does not fail,
-        it just quietly halves the number and keeps doing so forever."""
+    def test_a_report_is_priced_at_its_models_rate(self):
+        """The headline. 100k in / 10k out is $0.60 at claude-opus-5-5's $4/$20
+        per MTok. It was $0.75 on the model before, and a constant left behind by
+        a model change does not fail: it just keeps printing the old number."""
         report = self.generate({"input_tokens": 100_000, "output_tokens": 10_000})
 
-        self.assertAlmostEqual(report["cost"]["usd"], 0.75, places=6)
+        self.assertAlmostEqual(report["cost"]["usd"], 0.60, places=6)
         self.assertEqual(report["cost"]["input"], 100_000)
         self.assertEqual(report["cost"]["output"], 10_000)
 
-    def test_the_rate_is_not_the_sonnet_rate_by_accident(self):
-        """Guards the constant itself rather than a call through it: an edit that
-        points this at `toolloop._PRICES` passes every other test here."""
+    def test_the_two_rates_agree_exactly_when_the_two_models_do(self):
+        """The report and the tool loop each name their own model and their own
+        rate. This used to assert the rates differed, because the models did and
+        borrowing the loop's rate under-priced every report. Now both run one
+        model, so differing would be the bug.
+
+        Written both ways round so it keeps working the day somebody moves one
+        caller to another model: that edit must also move that caller's rate, and
+        every other test here passes if it does not."""
         from app import toolloop
 
-        self.assertNotEqual(self.reports.OPUS_USD_PER_MTOK, toolloop._PRICES["intro"])
-        self.assertNotEqual(self.reports.OPUS_USD_PER_MTOK, toolloop._PRICES["list"])
+        same_model = _reports.ai.MODEL == toolloop.MODEL
+        same_rate = tuple(self.reports.OPUS_USD_PER_MTOK) == tuple(toolloop.USD_PER_MTOK)
+        self.assertEqual(same_model, same_rate,
+                         f"report: {_reports.ai.MODEL} at {self.reports.OPUS_USD_PER_MTOK}, "
+                         f"tool loop: {toolloop.MODEL} at {toolloop.USD_PER_MTOK}")
+
+    def test_the_tool_loop_prices_a_cache_read_at_this_models_discount(self):
+        """Every iteration of a tool loop re-reads the cached prefix, so the
+        cache-read multiplier is most of a long run's input bill. It is 0.05x on
+        claude-opus-5-5 and was 0.1x before, and the triage budget is counted in
+        the dollars this function returns."""
+        from types import SimpleNamespace
+        from app import toolloop
+
+        usage = SimpleNamespace(input_tokens=1_000, cache_creation_input_tokens=2_000,
+                                cache_read_input_tokens=1_000_000, output_tokens=500)
+        # 1k fresh at $4 + 2k written at $5 + 1M read at $0.20 + 500 out at $20
+        self.assertAlmostEqual(toolloop.cost(usage), 0.004 + 0.010 + 0.20 + 0.010, places=6)
 
     def test_the_model_the_price_was_checked_against_is_recorded(self):
         """A hand-checked rate outlives the model it was checked against, so the
@@ -528,7 +553,7 @@ class MeterTest(unittest.TestCase):
         self.generate(None)
 
         spend = self.reports.get_state()["spend"]
-        self.assertAlmostEqual(spend["usd"], 0.75, places=6)
+        self.assertAlmostEqual(spend["usd"], 0.60, places=6)
         self.assertEqual(spend["reports"], 1, "the unpriced report must not be counted")
         self.assertEqual(spend["unmetered"], 1, "…but it must be admitted to")
 

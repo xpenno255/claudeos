@@ -623,9 +623,18 @@ class TriageRunTest(IsolatedDataDirTest):
         self.assertEqual(offered & writes, set(), "a write tool was offered to the model")
         self.assertTrue(offered, "no tools were offered at all")
 
-        # The final call drops tools and asks for the schema instead.
+        # The final call forbids tool use and asks for the schema instead. The
+        # tool list itself is still sent: it is part of what a replayed thinking
+        # block is signed against, so a final call that dropped it would be
+        # rejected on accounts where that check is enforced, after the whole
+        # investigation had been paid for.
         final = client.calls[-1]
-        self.assertNotIn("tools", final, "the final call could still request a tool")
+        self.assertEqual(final.get("tool_choice"), {"type": "none"},
+                         "the final call could still request a tool")
+        self.assertEqual(final.get("tools"), client.calls[0]["tools"],
+                         "the tool list changed between calls of one run")
+        for call in client.calls[:-1]:
+            self.assertNotIn("tool_choice", call, "an earlier call was forbidden its tools")
         self.assertEqual(final["output_config"]["format"]["schema"],
                          _verdict.VERDICT_SCHEMA)
         for call in client.calls[:-1]:

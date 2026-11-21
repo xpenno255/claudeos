@@ -55,18 +55,21 @@ RETRY_AFTER = 1800
 
 # What one report costs, per million tokens.
 #
-# Deliberately **not** `toolloop._PRICES`: that is Sonnet 5 ($3/$15 list,
-# introductory $2/$10 to 2026-08-31), and a report is a single Opus call over a
-# snapshot capped at 120k characters. Pricing it as Sonnet would under-report the
-# most expensive call this app makes by roughly an order of magnitude (#60), so
-# the two rates stay separate constants rather than one shared one.
+# A constant of its own rather than `toolloop.USD_PER_MTOK`, although today the
+# two are equal because both callers run the same model. They were not always:
+# the loop ran Sonnet while this ran Opus, and pricing a report at the loop's
+# rate would have under-reported the most expensive call this app makes while
+# looking entirely plausible (#60). The two models are named in two places
+# (`ai.MODEL`, `toolloop.MODEL`) and can part again, so the rates stay in two
+# places with them, and a test holds each pair together.
 #
-# claude-opus-5 list price, checked 2026-07-28: $5 / $25 per MTok — the same as
-# claude-opus-4-8, which this app called until #62, so the bump between them
-# needed no new figure. That is luck, not a rule: this is a number that has to be
-# re-checked rather than derived, which is why every report records the model it
-# was actually priced against instead of trusting this comment to stay true.
-OPUS_USD_PER_MTOK = (5.0, 25.0)
+# claude-opus-5-5 list price, checked 2026-11-21 against
+# platform.claude.com/docs/en/about-claude/pricing: $4 / $20 per MTok, down from
+# the $5 / $25 of claude-opus-5 and claude-opus-4-8 before it. This is a number
+# that has to be re-checked rather than derived, which is why every report
+# records the model it was actually priced against instead of trusting this
+# comment to stay true.
+OPUS_USD_PER_MTOK = (4.0, 20.0)
 
 # The bookkeeping `set_config` has to carry forward. `out` there is built fresh
 # from the caller's payload, so anything not named here is destroyed by saving

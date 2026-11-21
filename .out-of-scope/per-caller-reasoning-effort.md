@@ -1,8 +1,19 @@
 # Per-Caller Reasoning Effort on the AI Analyses
 
-`app/ai.py` sends no `output_config.effort` on any call. All four analyses —
-`analyze_health`, `analyze_ha_logs`, `analyze_zha`, `analyze_unifi_event` — run at
-the API default of `high`, and that is deliberate rather than an omission.
+`app/ai.py` sends one `output_config.effort` on every call, `ai.EFFORT`. All four
+analyses — `analyze_health`, `analyze_ha_logs`, `analyze_zha`,
+`analyze_unifi_event` — run at it, and that it is one value rather than four is
+deliberate rather than an omission.
+
+> **Updated 2026-11-21, with the move to `claude-opus-5-5`.** This used to say
+> the analyses sent no effort at all and ran at the API default of `high`. That
+> default belonged to `claude-opus-5`. On `claude-opus-5-5` an omitted effort is
+> `medium`, so leaving it out would have changed what was asked for without any
+> code changing. The value is therefore written down (`medium`, the new model's
+> own default and the level its guidance starts from) — one constant for all
+> four. Nothing below about tuning them *apart* has changed, and the model facts
+> under "What was established" are the old model's, kept as the record of what
+> was decided against.
 
 This covers every variant of "tune the effort per caller": a constant per analysis,
 an effort field on the Setup page, dropping the interactive callers to `low`, or
@@ -77,8 +88,9 @@ State the target before touching the constant, because it decides the instrument
   motivation when the sweep did. If per-analysis cost visibility is ever wanted for
   its own sake, that is a fresh ticket on its own merits.
 
-Whichever it is: do not raise `analyze_health` above `high` without raising its
-`max_tokens` in the same change.
+Whichever it is: do not raise `ai.EFFORT` above `high` without raising
+`analyze_health`'s `max_tokens` in the same change. It is 16000 since the move to
+`claude-opus-5-5`, where thinking cannot be disabled and always shares that cap.
 
 ## Prior requests
 

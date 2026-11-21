@@ -30,11 +30,15 @@ expensive*. Ten modules clear it.
   week, and the failure that loops is the one that gets billed (#27, ~$870 worst
   case). `generate()` takes its snapshot, its analysis call and its clock as
   arguments so the expensive paths are tested with none of them. The meter earns
-  its own class for a different reason (#60): a wrong *rate* is invisible, and
-  `toolloop._PRICES` is Sonnet's, sits one import away, applies to the same
-  `_usage` shape, and would under-report the app's priciest call by an order of
-  magnitude while looking plausible. One test exists only to assert the two
-  constants differ, because every other test passes if they don't. And the
+  its own class for a different reason (#60): a wrong *rate* is invisible. The
+  tool loop's rate sits one import away and applies to the same `_usage` shape,
+  and when the loop ran Sonnet it would have under-reported the app's priciest
+  call while looking plausible. Both now run `claude-opus-5-5`, so the two rates
+  are equal on purpose, and one test exists only to hold each rate to its model:
+  equal while the models match, different once they do not, because every other
+  test passes either way. The loop's cache-read discount is pinned beside it,
+  since a tool loop re-reads its cached prefix every iteration and the triage
+  budget is counted in those dollars. And the
   weekly update, which shares the slot: image updates are announced nowhere else
   now, so one that never goes out is the feature gone with nothing to show it,
   and one sent both alone and inside the report is the noise it replaced. The
