@@ -15,6 +15,13 @@ and the two app-module caches attached to a system's block.
 Scheduling is a lightweight stdlib loop: every few minutes it checks
 whether the configured weekly slot (day + hour, server-local time) has
 passed since the last run.
+
+**The weekly update** shares that slot and does not need the AI report. It is
+the handful of facts deliberately *not* pushed as they happen: how many
+container updates are waiting, and which systems blipped without paging
+anybody. With the report enabled they are the last lines of its message; with
+it disabled, or given up on for the week, they go out alone. Either way the
+owner gets one message a week about housekeeping instead of one per image.
 """
 
 import datetime
@@ -24,8 +31,8 @@ import secrets
 import threading
 import time
 
-from . import (ai, backups, labissues, monitors, notify, offhours, oplog, poller,
-               registry, smart, store)
+from . import (ai, backups, labissues, monitors, notify, offhours, oplog, outage,
+               poller, registry, smart, store)
 from .connectors import CONNECTORS
 from .connectors._report import soft
 from .store import DATA_DIR
@@ -61,8 +68,15 @@ RETRY_AFTER = 1800
 # was actually priced against instead of trusting this comment to stay true.
 OPUS_USD_PER_MTOK = (5.0, 25.0)
 
+# The bookkeeping `set_config` has to carry forward. `out` there is built fresh
+# from the caller's payload, so anything not named here is destroyed by saving
+# the schedule.
+_BOOKKEEPING = ("last_run", "last_attempt", "attempts", "attempt_slot", "last_error",
+                "weekly_last")
+
 DEFAULT_CONFIG = {
-    "enabled": False, "day": 0, "hour": 8,   # Monday 08:00
+    "enabled": False, "day": 5, "hour": 8,   # Saturday 08:00
+    "weekly_last": 0,       # last time the weekly update went out, alone or not
     "last_run": 0,          # last time a scheduled report SUCCEEDED
     "last_attempt": 0,      # last time one was tried, successful or not
     "attempts": 0,          # tries against `attempt_slot`
@@ -79,10 +93,19 @@ def _load() -> dict:
         return {"config": dict(DEFAULT_CONFIG), "reports": []}
     with open(PATH, "r", encoding="utf-8") as f:
         d = json.load(f)
+    stored = d.get("config") or {}
+    if ("weekly_last" not in stored and not stored.get("enabled")
+            and (stored.get("day"), stored.get("hour")) == (0, 8)):
+        # Written before the weekly update existed, with the report off and the
+        # slot at what was then the default. Nobody chose Monday: the form saves
+        # day and hour whenever it saves anything. So the slot follows the
+        # default to Saturday. A report that was switched on keeps its day, and
+        # so does anything saved from here on, which carries `weekly_last`.
+        stored = {k: v for k, v in stored.items() if k not in ("day", "hour")}
     # Merged, not defaulted: a config written before the retry bookkeeping
     # existed is missing those keys, and every reader would otherwise have to
     # carry its own fallback for each one.
-    d["config"] = {**DEFAULT_CONFIG, **(d.get("config") or {})}
+    d["config"] = {**DEFAULT_CONFIG, **stored}
     d.setdefault("reports", [])
     return d
 
@@ -169,7 +192,7 @@ def set_config(cfg: dict) -> dict:
         # payload, so anything not copied here is destroyed by saving the
         # schedule — and dropping `last_run` would make the current slot due
         # again, which is the retry storm this module was just fixed for.
-        for k in ("last_run", "last_attempt", "attempts", "attempt_slot", "last_error"):
+        for k in _BOOKKEEPING:
             out[k] = d["config"].get(k, DEFAULT_CONFIG[k])
         d["config"] = out
         _save(d)
@@ -307,20 +330,28 @@ def generate(trigger: str = "manual", *, snapshot=None, analyse=None, now=None) 
             if trigger == "scheduled":
                 # The slot is settled: clear the attempt state so a later failure
                 # on the NEXT slot starts from a clean count, and drop the stale
-                # error so the UI stops reporting a problem that is over.
+                # error so the UI stops reporting a problem that is over. The
+                # weekly update rides in this message, so it is settled too.
                 d["config"].update(last_run=clock, attempts=0, attempt_slot=0,
-                                   last_error=None)
+                                   last_error=None, weekly_last=clock)
             _save(d)
 
         grade = report.get("grade", "?")
         findings = report.get("findings") or []
         worst = {"critical", "serious"} & {f.get("severity") for f in findings}
-        top = "; ".join(f.get("title", "") for f in findings[:3])
+        scheduled = trigger == "scheduled"
+        # One phone screen: the counts, the three findings that lead, and where
+        # the rest is. The prose summary stays on the Reports tab, which is
+        # where somebody with time to read it will be.
+        body = [_severity_line(findings)]
+        body += [f"• {f.get('title', '')}"[:160] for f in findings[:3]]
+        if scheduled:
+            body += weekly_lines(clock)
         notify.send(
-            f"Homelab health report — grade {grade}",
-            (report.get("summary", "") + (f" Top findings: {top}" if top else ""))[:900],
+            f"{'WEEKLY LAB REPORT' if scheduled else 'LAB REPORT'} · grade {grade}",
+            "\n".join(body)[:900],
             priority="high" if worst else "default",
-            tags=["clipboard"])
+            tags=["clipboard"], link="#/ops/reports")
         # The cost goes in the log line too, not only on the report: the ops log
         # is where spend is looked for after the fact, and triage already answers
         # "what did that run cost" there.
@@ -332,6 +363,92 @@ def generate(trigger: str = "manual", *, snapshot=None, analyse=None, now=None) 
         return report
     finally:
         _running.clear()
+
+
+def _severity_line(findings: list) -> str:
+    """`1 critical · 2 serious · 3 warnings`, worst first, zeros left out."""
+    parts = []
+    for sev, plural in (("critical", "critical"), ("serious", "serious"),
+                        ("warning", "warnings")):
+        n = sum(1 for f in findings if f.get("severity") == sev)
+        if n:
+            parts.append(f"{n} {sev if n == 1 else plural}")
+    return " · ".join(parts) or "nothing serious found"
+
+
+# ---------------------------------------------------------- weekly update
+
+WEEKLY_BLIP_LINES = 5
+
+
+def weekly_lines(now: float) -> list:
+    """What the week left that nobody was paged about. Empty if nothing did.
+
+    Reads only what the app already knows: `registry.peek()` never sweeps, so a
+    slow registry cannot hold the weekly message up, and the count is at most
+    one sweep interval old.
+
+    Images are counted, never listed. A list of `lscr.io/…:latest` names is
+    twenty links on a phone, and the Containers tab already has it.
+    """
+    lines = []
+    cache = registry.peek()
+    waiting = sum(1 for i in cache.get("images") or [] if i.get("status") == "update")
+    if waiting:
+        lines.append(f"{waiting} container update{'' if waiting == 1 else 's'} to install")
+    week = sorted(outage.blips(now - 7 * 86400).items(),
+                  key=lambda kv: (-kv[1]["count"], kv[0]))
+    for label, b in week[:WEEKLY_BLIP_LINES]:
+        n = b["count"]
+        lines.append(f"{label}: {n} short blip{'' if n == 1 else 's'} this week "
+                     f"(longest {outage.span(b['longest'])})")
+    return lines
+
+
+def _weekly_due(cfg: dict, now: float) -> bool:
+    """Is this week's update owed, with no report left to carry it?
+
+    Not while the report for this slot may still run: it carries these lines,
+    and sending them twice is the noise this exists to remove. Once the report
+    is off, or has used up its attempts, the update goes alone, because a failed
+    report must not take the housekeeping down with it.
+    """
+    slot = _slot(cfg, now)
+    if slot > now or (cfg.get("weekly_last") or 0) >= slot:
+        return False
+    if cfg.get("enabled") and (cfg.get("last_run") or 0) < slot:
+        tried = int(cfg.get("attempts") or 0) if cfg.get("attempt_slot") == slot else 0
+        if tried < MAX_ATTEMPTS:
+            return False
+    return True
+
+
+def _mark_weekly(now: float) -> None:
+    with _lock:
+        d = _load()
+        d["config"]["weekly_last"] = now
+        _save(d)
+
+
+def send_weekly(now: float) -> bool:
+    """Send the weekly update on its own. True if there was anything to say.
+
+    Marked before it is sent, the ordering #27 was fixed with: whatever happens
+    next, this slot has been dealt with and cannot come round again in five
+    minutes.
+
+    Nothing is sent with no channel configured. `notify.send` would record that
+    as an alert lost, and raise a banner over a count of pending updates that
+    the dashboard is already showing.
+    """
+    _mark_weekly(now)
+    lines = weekly_lines(now)
+    if not lines or not notify.channels():
+        return False
+    notify.send("WEEKLY UPDATE", "\n".join(lines), priority="low",
+                tags=["clipboard"], link="#/ops/containers")
+    oplog.add("info", "reports", "weekly update sent: " + "; ".join(lines))
+    return True
 
 
 # -------------------------------------------------------------- scheduler
@@ -417,15 +534,28 @@ def _due(cfg: dict, now: float) -> bool:
     return True
 
 
+def tick(now: float) -> None:
+    """One pass of the scheduler: the report if it is due, else the update."""
+    with _lock:
+        cfg = _load()["config"]
+    if not cfg.get("weekly_last"):
+        # Never sent, which is every install on the day this arrives. Start the
+        # count from now, so the first update comes at the next slot rather than
+        # five minutes after a deploy on whatever day that happens to be.
+        _mark_weekly(now)
+        cfg["weekly_last"] = now
+    if _due(cfg, now):
+        generate("scheduled", now=now)
+    elif _weekly_due(cfg, now):
+        send_weekly(now)
+
+
 def start() -> None:
     def loop():
         while True:
             time.sleep(TICK)
             try:
-                with _lock:
-                    cfg = _load()["config"]
-                if _due(cfg, time.time()):
-                    generate("scheduled")
+                tick(time.time())
             except Exception as e:  # noqa: BLE001
                 oplog.add("error", "reports", f"scheduled report failed: {e}")
 

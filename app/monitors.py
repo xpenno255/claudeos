@@ -11,8 +11,10 @@ Every CHECK_INTERVAL seconds each enabled monitor is probed concurrently
 Monitor definitions live in data/monitors.json (no secrets, so outside
 the encrypted store). Status + response-time history is kept in ring
 buffers (~24 h) for sparklines and uptime %. A monitor alerts through
-app.notify after FAILS_TO_ALERT consecutive failures and again on the
-first success after a down alert.
+app.notify once it has been failing for its wait (`outage.down_after`, five
+minutes unless the monitor says otherwise) and again on the first success
+after a down alert. A failure that ends sooner is counted for the weekly
+update instead of paged.
 """
 
 import json
@@ -24,7 +26,7 @@ import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
-from . import alertstate, notify, oplog, sweeper
+from . import alertstate, notify, oplog, outage, sweeper
 from .httpclient import request
 from .store import DATA_DIR
 
@@ -33,9 +35,9 @@ PATH = os.path.join(DATA_DIR, "monitors.json")
 CHECK_INTERVAL = 30
 CHECK_TIMEOUT = 6
 HISTORY_LEN = 2880  # ~24 h at 30 s
-FAILS_TO_ALERT = 2  # consecutive failures before the down alert fires
 
 TYPES = ("http", "keyword", "tcp", "dns")
+TAB = "#/ops/uptime"
 
 _lock = threading.Lock()
 _state: dict = {}    # id -> {"ok","ms","error","ts","since","fails","alerted"}
@@ -85,6 +87,18 @@ def _validate(cfg: dict) -> dict:
         host, _, port = target.rpartition(":")
         if not host or not port.isdigit():
             raise ValueError("tcp target must be host:port")
+    # Optional: how long this monitor may fail before it is DOWN. Refused here
+    # rather than quietly defaulted, because this is the one place a human is
+    # watching the answer; `outage.down_after` forgives whatever is on disk.
+    wait = cfg.get("down_after_min")
+    if wait not in (None, ""):
+        try:
+            wait = float(wait)
+        except (TypeError, ValueError):
+            wait = -1
+        if not 0 <= wait <= 1440:
+            raise ValueError("down-after must be a number of minutes, 0 to 1440")
+        out["down_after_min"] = wait
     return out
 
 
@@ -179,38 +193,44 @@ def _probe(mon: dict) -> float:
     return (time.monotonic() - t0) * 1000
 
 
-def _record(mon: dict, ok: bool, ms: float | None, error: str | None) -> None:
-    mid, now = mon["id"], time.time()
+def _record(mon: dict, ok: bool, ms: float | None, error: str | None, now=None) -> None:
+    mid = mon["id"]
+    now = time.time() if now is None else now
     with _lock:
         st = _state.get(mid) or {"ok": None, "since": now, "fails": 0}
+        was_ok, flipped_at = st["ok"], st["since"]
         if st["ok"] != ok:
             st["since"] = now  # status flipped — restart the up/down clock
         st.update(ok=ok, ms=ms, error=error, ts=now)
         st["fails"] = 0 if ok else st["fails"] + 1
-        fails = st["fails"]
+        failing_since = st["since"]
         _state[mid] = st
         _history.setdefault(mid, deque(maxlen=HISTORY_LEN)).append(
             (now, ok, round(ms, 1) if ms is not None else None))
 
     # Whether a DOWN is outstanding is an `alertstate` latch, claimed atomically
     # and kept across restarts, so a DOWN sent just before a deploy still gets
-    # its "recovered" (#73). Claimed outside `_lock`, as before: commit the state
+    # its "back up" (#73). Claimed outside `_lock`, as before: commit the state
     # change, then send.
     key = f"monitor:{mid}"
     if ok:
+        began = alertstate.since("monitor", mid)
         if alertstate.claim("monitor", mid, None) == "down":
             oplog.add("info", "monitor", f"{mon['name']} recovered")
-            notify.send(f"Monitor {mon['name']} recovered",
-                        f"{mon['type']} check on {mon['target']} succeeding again "
-                        f"({ms:.0f} ms)", priority="default", tags=["white_check_mark"],
-                        key=key)
-    elif (fails >= FAILS_TO_ALERT
-          and alertstate.claim("monitor", mid, "down") is not alertstate.NO_CHANGE):
+            notify.send(f"MONITOR · {mon['name']} · back up", outage.was_down(began, now),
+                        priority="default", tags=["white_check_mark"], key=key,
+                        link=TAB)
+        elif was_ok is False:
+            # Over before it was worth a page; counted for the weekly update.
+            outage.note_blip(f"Monitor {mon['name']}", flipped_at, now)
+    elif (now - failing_since >= outage.down_after(mon)
+          and alertstate.claim("monitor", mid, "down",
+                               since=failing_since) is not alertstate.NO_CHANGE):
         oplog.add("warn", "monitor", f"{mon['name']} is down: {error}")
-        notify.send(f"Monitor {mon['name']} is DOWN",
-                    f"{mon['type']} check on {mon['target']} failed "
-                    f"{fails}x: {error}", priority="high", tags=["rotating_light"],
-                    key=key)
+        notify.send(f"MONITOR · {mon['name']} · down",
+                    f"{mon['type']} check: {outage.brief(error)}\n"
+                    f"{outage.since_line(failing_since, now, 'failing')}",
+                    priority="high", tags=["rotating_light"], key=key, link=TAB)
 
 
 def check_all() -> None:

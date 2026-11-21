@@ -29,6 +29,12 @@ it was never raised again (#72). The mute now takes a subject key and drops only
 an exact repeat for that subject; `_muted` takes its clock as an argument so the
 cooldown boundary is tested without waiting.
 
+`TelegramTest` is one assertion wide. Telegram delivers routine messages
+without a sound so that a buzz keeps meaning something, which makes the flag a
+way to deliver a failing disk in silence: the message arrives, the ops log says
+"sent", and nothing anywhere looks wrong. The rule is tested in both directions
+and the layout is not.
+
 Nothing else in `notify.py` is tested, and this file is not an invitation to
 change that. No network: the gap is recorded before any sender is reached, and
 every test that needs a delivery to succeed or fail substitutes the sender.
@@ -289,6 +295,35 @@ class RetryTest(_NotifyFixture):
         self.raise_alert()
         self.assertTrue(any("was not delivered" in m and "after 1 attempts" in m
                             for m in self.log_lines()))
+
+
+class TelegramTest(_NotifyFixture):
+    """Which alerts may arrive without a sound."""
+
+    def setUp(self):
+        super().setUp()
+        self.store.save_system("telegram", {"bot_token": "1:AA", "chat_id": "42"})
+        self.posted = []
+        self.notify.request = lambda method, url, json_body=None, **kw: self.posted.append(json_body)
+
+    def deliver(self, priority, tags=None):
+        self.notify._fan_out("DISK · /dev/sda on pve · fail", "m", priority, tags)
+        return self.posted[-1]
+
+    def test_what_pages_is_never_delivered_silently(self):
+        """`urgent` exists because the window to act is short (a failing disk),
+        and `high` is lab-down. Neither may be muted by a flag meant for chatter,
+        whatever tags the alert happens to carry."""
+        for priority in ("high", "urgent"):
+            for tags in (None, ["rotating_light"], ["clipboard"], ["white_check_mark"]):
+                self.assertIs(self.deliver(priority, tags)["disable_notification"], False,
+                              f"{priority} with {tags} arrived without a sound")
+
+    def test_routine_messages_do_not_buzz(self):
+        """The other half: if these buzzed too, the buzz would mean nothing, and
+        the owner would be back to swiping "is DOWN" away."""
+        for priority in ("low", "default"):
+            self.assertIs(self.deliver(priority)["disable_notification"], True)
 
 
 class MuteTest(_NotifyFixture):

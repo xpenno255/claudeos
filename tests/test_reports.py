@@ -13,6 +13,16 @@ So the tests here are about *not spending money*. `generate()` takes its snapsho
 its analysis call and its clock as arguments; nothing below touches the network,
 an API key, or the real time. Only the schedule is under test — the digest's
 contents, the prompt and the notification are not.
+
+`WeeklyUpdateTest` is here for the opposite failure. Container image updates
+used to be pushed as they appeared; they are now one line of a weekly message
+and nothing else ever mentions them on a phone. So a weekly update that quietly
+never goes out is the whole feature gone with nothing to show it, and one that
+goes out every five minutes, or once alone and once inside the report, is the
+noise it replaced. The slot arithmetic is shared with the report, and the two
+have to agree about who is carrying the lines this week, which is where it would
+go wrong. The scheduler's `tick` takes its clock, and the notifier and the
+registry cache are substituted.
 """
 
 import datetime
@@ -23,6 +33,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -247,6 +258,167 @@ class ScheduleTest(unittest.TestCase):
 
         self.assertIsNotNone(self.config()["last_error"])
         self.assertEqual(self.config()["attempts"], 1)
+
+
+class WeeklyUpdateTest(unittest.TestCase):
+    """Saturday 08:00, starting from an install made the Wednesday before."""
+
+    SATURDAY = datetime.datetime(2026, 11, 21, 8, 0)
+    INSTALLED = datetime.datetime(2026, 11, 18, 12, 0)
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["CLAUDEOS_DATA"] = self.tmp
+        importlib.reload(_store)
+        self.reports = importlib.reload(_reports)
+        self.sent = []
+        self.images = [{"ref": f"lscr.io/linuxserver/app{i}:latest", "status": "update"}
+                       for i in range(22)] + [{"ref": "postgres:16", "status": "current"}]
+        self.analyse = working()
+        for target, name, stand_in in (
+                (self.reports.notify, "send",
+                 lambda title, message, **kw: self.sent.append((title, message, kw))),
+                (self.reports.notify, "channels", lambda: ["telegram"]),
+                (self.reports.registry, "peek", lambda: {"images": self.images}),
+                (self.reports, "collect", snapshot),
+                (self.reports.ai, "analyze_health", lambda data: self.analyse(data))):
+            patcher = mock.patch.object(target, name, stand_in)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        restore_data_dir()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        importlib.reload(_store)
+
+    def run_until(self, end, start=None):
+        """Every tick the scheduler takes from `start` to `end`, five minutes apart."""
+        t = (start or self.INSTALLED).timestamp()
+        while t <= end.timestamp():
+            try:
+                self.reports.tick(t)
+            except Exception:  # noqa: BLE001 — the loop in `start()` swallows these too
+                pass
+            t += self.reports.TICK
+        return t
+
+    def a_week_later(self):
+        return self.SATURDAY + datetime.timedelta(days=7)
+
+    def updates(self):
+        return [(t, m) for t, m, _ in self.sent if t == "WEEKLY UPDATE"]
+
+    # ------------------------------------------------------------ it arrives
+
+    def test_it_goes_out_at_the_slot_once(self):
+        self.run_until(self.SATURDAY + datetime.timedelta(days=6))
+        self.assertEqual(len(self.updates()), 1, "one slot passed, so one update")
+        _, message = self.updates()[0]
+        self.assertEqual(message, "22 container updates to install")
+
+    def test_it_comes_round_again_the_next_week(self):
+        self.run_until(self.a_week_later() + datetime.timedelta(hours=1))
+        self.assertEqual(len(self.updates()), 2)
+
+    def test_it_does_not_need_the_ai_report(self):
+        """The report is off by default and costs money. The housekeeping must
+        not be a feature you only get by paying for the other one."""
+        self.assertFalse(self.reports.get_state()["config"]["enabled"])
+        self.run_until(self.SATURDAY + datetime.timedelta(hours=1))
+        self.assertEqual(len(self.updates()), 1)
+
+    def test_a_first_start_waits_for_the_slot(self):
+        """Last Saturday's slot is in the past on every first start, and a fresh
+        install has never sent for it. It must not read as overdue."""
+        self.run_until(self.SATURDAY - datetime.timedelta(minutes=10))
+        self.assertEqual(self.sent, [])
+
+    def test_an_install_that_never_chose_a_day_moves_to_saturday(self):
+        """The schedule form saves day and hour whenever it saves anything, so an
+        install with the report off still has the old default, Monday, on disk.
+        Read as a choice, that would deliver every update two days late for
+        good, and nothing would look wrong."""
+        import json
+        with open(self.reports.PATH, "w", encoding="utf-8") as f:
+            json.dump({"config": {"enabled": False, "day": 0, "hour": 8, "last_run": 0},
+                       "reports": []}, f)
+        self.run_until(self.SATURDAY + datetime.timedelta(hours=1))
+        self.assertEqual(len(self.updates()), 1)
+        self.assertEqual(self.reports.get_state()["config"]["day"], 5)
+
+    def test_a_report_scheduled_for_monday_stays_on_monday(self):
+        import json
+        with open(self.reports.PATH, "w", encoding="utf-8") as f:
+            json.dump({"config": {"enabled": True, "day": 0, "hour": 8,
+                                  "last_run": self.INSTALLED.timestamp()},
+                       "reports": []}, f)
+        self.assertEqual(self.reports.get_state()["config"]["day"], 0)
+
+    def test_a_restart_does_not_send_it_again(self):
+        """Every deploy is a restart. The notifier and the registry are separate
+        modules and keep their stand-ins; only `reports` forgets everything."""
+        self.run_until(self.SATURDAY + datetime.timedelta(hours=1))
+        self.reports = importlib.reload(_reports)
+        self.run_until(self.SATURDAY + datetime.timedelta(days=2),
+                       start=self.SATURDAY + datetime.timedelta(hours=1))
+        self.assertEqual(len(self.updates()), 1)
+
+    # --------------------------------------------- one message, not two
+
+    def test_with_the_report_on_it_rides_in_the_report(self):
+        self.reports.set_config({"enabled": True, "day": 5, "hour": 8})
+        end = self.run_until(self.SATURDAY - datetime.timedelta(hours=1))
+        # Enabling the report runs it for the slot already passed, as it always
+        # has. That one is not what is being counted.
+        before = len(self.sent)
+        self.run_until(self.SATURDAY + datetime.timedelta(days=6),
+                       start=datetime.datetime.fromtimestamp(end))
+        self.assertEqual(self.updates(), [], "the report carried it; twice is the old noise")
+        saturday = self.sent[before:]
+        self.assertEqual([t for t, _, _ in saturday], ["WEEKLY LAB REPORT · grade A"])
+        self.assertIn("22 container updates to install", saturday[0][1])
+
+    def test_a_report_that_gives_up_does_not_take_it_down_too(self):
+        """Three failed attempts and the report stops trying until next week.
+        The update was waiting for it, and must then go out on its own."""
+        self.reports.set_config({"enabled": True, "day": 5, "hour": 8})
+        self.analyse = broken()
+        self.run_until(self.SATURDAY + datetime.timedelta(days=6))
+        self.assertEqual(len(self.updates()), 1)
+        self.assertFalse(any(t.startswith("WEEKLY LAB REPORT") for t, _, _ in self.sent))
+
+    def test_it_waits_while_the_report_is_still_retrying(self):
+        self.reports.set_config({"enabled": True, "day": 5, "hour": 8})
+        self.analyse = broken()
+        self.run_until(self.SATURDAY + datetime.timedelta(minutes=20))
+        self.assertEqual(self.sent, [], "the report has attempts left and may yet carry it")
+
+    # ------------------------------------------------------- what it says
+
+    def test_images_are_counted_never_listed(self):
+        """A list of image names is twenty links on a phone."""
+        self.run_until(self.SATURDAY + datetime.timedelta(hours=1))
+        self.assertNotIn("lscr.io", self.updates()[0][1])
+
+    def test_it_says_which_systems_blipped(self):
+        at = (self.SATURDAY - datetime.timedelta(days=1)).timestamp()
+        for i in range(6):
+            self.reports.outage.note_blip("Home Assistant", at + i * 600, at + i * 600 + 60)
+        self.reports.outage.note_blip("UniFi Network", at, at + 120)
+        self.run_until(self.SATURDAY + datetime.timedelta(hours=1))
+        self.assertEqual(self.updates()[0][1].split("\n"), [
+            "22 container updates to install",
+            "Home Assistant: 6 short blips this week (longest 1m)",
+            "UniFi Network: 1 short blip this week (longest 2m)"])
+
+    def test_a_week_with_nothing_to_say_sends_nothing(self):
+        self.images = []
+        self.run_until(self.a_week_later() + datetime.timedelta(hours=1))
+        self.assertEqual(self.sent, [])
+
+    def test_it_is_delivered_quietly(self):
+        self.run_until(self.SATURDAY + datetime.timedelta(hours=1))
+        self.assertEqual(self.sent[0][2]["priority"], "low")
 
 
 class MeterTest(unittest.TestCase):

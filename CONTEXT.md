@@ -16,8 +16,8 @@ Architecture and the JSON API surface live in `README.md`; agent conventions in
 
 A connector is a piece of the homelab whose reachability is itself meaningful — when
 it stops answering, something is wrong with the lab. `poller.poll_once()` sweeps every
-connector on a 30s interval, records ok/error plus sparkline metrics, and alerts on a
-`True→False` transition.
+connector on a 30s interval, records ok/error plus sparkline metrics, and alerts once
+one has been failing for its **wait**.
 
 **The interface is written down**, in the `app/connectors/__init__.py` docstring:
 `test`, `summary`, `metrics` and `report_slice`, the settings shape, and the exception
@@ -168,6 +168,10 @@ this whole app for lab-down and failing hardware, and a triage verdict must not
 arrive at that volume. What *does* page is the pair of states nobody would
 otherwise discover — where the feature has silently stopped working.
 
+On Telegram a `default` message arrives without a sound and `high` or `urgent`
+makes one (`notify.TELEGRAM_SILENT`), which is the same rule said in the only way
+that channel has to say it.
+
 **Severity is the gate, and it is the only one.** `notify.send` mutes an
 identical title for five minutes when no subject key is given, which is the case
 here, but these titles carry the issue number, so no two are ever equal and the
@@ -242,9 +246,9 @@ work is happening. Nothing is wrong; the box is asleep on purpose.
 
 ### Alert latch
 
-**The state a subject was last alerted as** — a system `down`, a disk `fail`, an
-image with an `update` — kept in `data/alerts.json` (`app/alertstate.py`), or in a
-backup job's own record for backups. Every alerter here alerts on a *transition*,
+**The state a subject was last alerted as** — a system `down`, a disk `fail` —
+kept in `data/alerts.json` (`app/alertstate.py`), or in a backup job's own record
+for backups. Every alerter here alerts on a *transition*,
 and the latch is what it transitions from.
 
 **It records an alert, not an observation**, and it outlives the process. Healthy
@@ -253,6 +257,48 @@ alerts (a system down at boot, a disk already failing), and a subject whose aler
 went out before a restart still gets its recovery afterwards (#73). Paired with a
 subject **key** on `notify.send`, which lets the five-minute mute drop a repeat of
 the same state without ever dropping a change of state (#72).
+
+### Wait
+
+**How long a connector or monitor may fail before it is DOWN**: five minutes
+(`outage.DOWN_AFTER_S`) unless the subject's own `down_after_min` says otherwise.
+A duration, not a count of failed polls. The count was two, about a minute, and a
+routine restart outlasts a minute, so Home Assistant applying an update paged
+`high` and "recovered" a minute later several times an evening.
+
+The cost is deliberate and stated: a real outage is announced one wait after it
+starts. The wait suppresses the page, never the fault. A failure that outlasts it
+alerts at `high` exactly as before, and the time a system spent asleep in an
+**expected-offline window** counts towards it, so a NAS that fails to wake alerts
+on the first poll past its grace.
+
+_Avoid_: "debounce" or "grace". **Grace** is the boot time allowed after an
+expected-offline window, which is a different number for a different reason.
+
+### Blip
+
+**A failure that ended inside the wait**, so nobody was paged and nobody is owed a
+recovery. Recorded in `data/blips.json` (`app/outage.py`) and counted per subject
+in the **weekly update**. It exists because raising the threshold moved these out
+of the owner's pocket, and without a count it would also have moved them out of
+sight: six one-minute 502s in an evening is not an update, it is something
+flapping. A system waking on schedule from an expected-offline window is not a
+blip; it failed at nothing.
+
+### Weekly update
+
+**The one message a week about things deliberately not pushed as they happen**:
+how many container image updates are waiting, and which subjects blipped
+(`reports.weekly_lines`). It shares the weekly report's slot (Saturday 08:00 by
+default) and does not depend on the report: with the AI report on, these are the
+last lines of the report's message; with it off, or given up on for the week, they
+go out alone. Never both. A week with nothing to say sends nothing.
+
+Image updates are **counted, never listed**, and are announced nowhere else. They
+used to be pushed one message per image as each was seen, which bought seven
+messages in five days and 22 updates still waiting.
+
+_Avoid_: "digest" for this. The **digest** is the AI report's graded output.
 
 ### Nowhere to go
 

@@ -7,6 +7,14 @@ import { el, labelFor } from "../util.js";
 import { BY_ID } from "../meta.js";
 import { confirmAction } from "../guard.js";
 
+// How long a system may fail before it is DOWN. On every monitored system and
+// worded the same on each, so it is one field rather than five copies. The
+// server reads it (app/outage.py); blank means its default.
+const DOWN_AFTER = {
+  key: "down_after_min", label: "DOWN AFTER (MIN) — OPTIONAL", placeholder: "5",
+  hint: "how long it may be unreachable before you are alerted — long enough to ride out an update reboot; shorter outages are counted in the weekly update instead",
+};
+
 const FORMS = [
   {
     id: "unifi",
@@ -16,6 +24,7 @@ const FORMS = [
       { key: "host", label: "CONTROLLER URL", placeholder: "https://192.168.1.1" },
       { key: "username", label: "LOCAL ADMIN USERNAME", placeholder: "claudeos" },
       { key: "password", label: "PASSWORD", secret: true },
+      DOWN_AFTER,
     ],
     tls: true,
   },
@@ -29,6 +38,7 @@ const FORMS = [
         hint: "full user@realm!tokenname — not just the token name" },
       { key: "token_secret", label: "TOKEN SECRET", secret: true,
         hint: "the UUID shown once when the token was created" },
+      DOWN_AFTER,
     ],
     tls: true,
   },
@@ -40,6 +50,7 @@ const FORMS = [
       { key: "host", label: "ENGINE API URL", placeholder: "http://192.168.1.30:2375" },
       { key: "glances_url", label: "GLANCES URL — OPTIONAL, FOR HOST VITALS", placeholder: "http://192.168.1.30:61208",
         hint: "docker run -d --pid host --network host nicolargo/glances:latest-full glances -w" },
+      DOWN_AFTER,
     ],
     tls: false,
   },
@@ -50,6 +61,7 @@ const FORMS = [
     fields: [
       { key: "host", label: "HA URL", placeholder: "http://192.168.1.20:8123" },
       { key: "token", label: "LONG-LIVED ACCESS TOKEN", secret: true },
+      DOWN_AFTER,
     ],
     tls: true,
   },
@@ -68,6 +80,7 @@ const FORMS = [
         hint: "may cross midnight; leave both blank to disable" },
       { key: "offline_grace_min", label: "WAKE GRACE (MIN)", placeholder: "15",
         hint: "boot time allowed after the window before it counts as DOWN" },
+      DOWN_AFTER,
     ],
     tls: true,
   },
@@ -191,9 +204,10 @@ export async function renderSetup(root, _args, { toast }) {
   root.append(el("div", { class: "panel accent", style: "margin:16px 0" },
     el("div", { class: "panel-title" }, "NOTIFICATION CHANNELS"),
     el("div", { class: "mono-dim", style: "font-size:12px" },
-      "Alerts — a linked system going down or recovering, plus everything the upcoming monitors add — ",
+      "Alerts — a system or monitor down for longer than its wait (5 minutes unless you set one), a failing disk, a failed backup — ",
       "fan out to every enabled channel below. SAVE + TEST sends a real test notification. ",
-      "Repeated identical alerts are muted for 5 minutes so a flapping box can't flood your phone.")));
+      "Shorter outages and waiting container updates are not pushed as they happen: they arrive as one weekly update, at the time set on Ops → Reports. ",
+      "On Telegram only high-priority alerts make a sound; recoveries and the weekly update arrive silently.")));
 
   const ngrid = el("div", { class: "setup-grid" });
   for (const form of NOTIFY_FORMS) ngrid.append(card(form, config[form.id], undefined, toast, overview.models));

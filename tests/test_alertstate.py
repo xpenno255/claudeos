@@ -15,6 +15,12 @@ is the expensive one: SMART pages `urgent` because the window to act is short.
 **The poller paged on every blip (#72).** 39 `high` DOWN/recovered pairs in 14
 days, each over in 30–100 seconds. Silent is the wrong word for that, but it is
 how silence gets made: an owner trained to ignore "is DOWN" ignores the real one.
+Waiting for a second failed poll was not enough, because a routine restart
+outlasts a minute, so the wait is now a duration (`outage.DOWN_AFTER_S`, five
+minutes, with a per-system override). That makes this a feature built to create
+silence, and what is tested is where the silence stops: a failure that outlasts
+the wait must still page, at `high`, exactly once. A failure that ends inside it
+must leave a count behind, or raising the threshold has only hidden the flapping.
 
 The seam: `app/alertstate.py` keeps the latches in one file under the data
 directory, and resolves that path on every call. A restart is simulated by
@@ -148,89 +154,146 @@ class _System:
 
 class PollerTest(_Fixture):
 
+    WAIT = _poller.outage.DOWN_AFTER_S
+
     def setUp(self):
         super().setUp()
         self.poller = importlib.reload(_poller)
+        self.settings = {"host": "h"}
+        self.clock = 1_700_000_000.0
         self.substitute()
 
     def substitute(self):
         mock.patch.object(self.poller, "CONNECTORS", {"homeassistant": _System}).start()
         mock.patch.object(self.store, "get_system",
-                          lambda sid, reveal_secrets=False: {"host": "h"}).start()
+                          lambda sid, reveal_secrets=False: dict(self.settings)).start()
         mock.patch.object(self.poller.notify, "send", self.notify).start()
 
-    def poll(self, alive):
+    def poll(self, alive, after=30):
+        """One poll, `after` seconds on from the last. The poller takes its
+        clock as an argument, so five minutes pass without anybody waiting."""
         _System.alive = alive
-        self.poller.poll_once()
+        self.clock += after
+        self.poller.poll_once(now=self.clock)
+
+    def outage(self, seconds):
+        """Fail every 30s for `seconds`, starting now."""
+        self.poll(False)
+        for _ in range(int(seconds // 30)):
+            self.poll(False)
 
     def restart(self):
         mock.patch.stopall()
         (self.poller,) = super().restart(_poller)
         self.substitute()
 
-    # ---------------------------------------------------- the debounce (#72)
+    # ------------------------------------------------- the wait before DOWN
 
-    def test_one_failed_poll_sends_nothing(self):
+    def test_a_restart_sized_outage_sends_nothing(self):
+        """The reason for the wait: Home Assistant applying an update is away
+        for a minute or two, and that used to page `high` and then "recovered"."""
         self.poll(True)
-        self.poll(False)
-        self.assertEqual(self.sent, [], "one 502 is a blip, not an outage")
+        self.outage(self.WAIT - 30)
+        self.poll(True)
+        self.assertEqual(self.sent, [])
 
-    def test_two_failed_polls_send_down(self):
+    def test_a_failure_that_outlasts_the_wait_sends_down(self):
+        """The boundary. Silent one poll short of the wait, and DOWN on the poll
+        that reaches it: a wait that never ends is an outage nobody hears about."""
         self.poll(True)
+        self.outage(self.WAIT - 30)
+        self.assertEqual(self.sent, [], "one poll short of the wait")
         self.poll(False)
-        self.poll(False)
-        self.assertEqual(self.titles(), ["Home Assistant is DOWN"])
-        _, _, kw = self.sent[0]
+        self.assertEqual(self.titles(), ["HOME ASSISTANT · down"])
+        _, message, kw = self.sent[0]
         self.assertEqual(kw["priority"], "high")
         self.assertEqual(kw["key"], "poller:homeassistant",
                          "without a key the mute cannot tell DOWN from a repeat of DOWN")
+        self.assertIn("unreachable for 5m", message)
 
     def test_it_says_down_once_however_long_it_lasts(self):
         self.poll(True)
-        for _ in range(6):
-            self.poll(False)
-        self.assertEqual(self.titles(), ["Home Assistant is DOWN"])
+        self.outage(self.WAIT * 4)
+        self.assertEqual(self.titles(), ["HOME ASSISTANT · down"])
 
-    def test_a_blip_recovers_silently(self):
-        """No DOWN went out, so there is nothing to have recovered from."""
+    def test_the_wait_is_the_systems_own_if_it_has_one(self):
+        self.settings["down_after_min"] = "10"
         self.poll(True)
-        self.poll(False)
+        self.outage(self.WAIT)
+        self.assertEqual(self.sent, [], "this system was given ten minutes")
+        self.outage(self.WAIT)
+        self.assertEqual(self.titles(), ["HOME ASSISTANT · down"])
+
+    def test_a_wait_nobody_can_read_is_the_default_not_forever(self):
+        """A typo in a Setup field must not be able to silence a system."""
+        for junk in ("soon", "-5", "nan", "99999", True):
+            self.assertEqual(self.poller.outage.down_after({"down_after_min": junk}),
+                             self.WAIT, junk)
+        self.assertEqual(self.poller.outage.down_after({"down_after_min": "0"}), 0,
+                         "zero is a deliberate answer: alert on the first failure")
+
+    def test_the_error_reads_without_its_url(self):
+        brief = self.poller.outage.brief
+        self.assertEqual(brief("HTTP 502 from https://ha.example.org/api/config"),
+                         "HTTP 502 (bad gateway)")
+        self.assertEqual(brief("cannot reach http://192.168.1.20:8123/api: "
+                               "[Errno 111] Connection refused"),
+                         "unreachable: Connection refused")
+        self.assertEqual(brief("timeout reaching https://192.168.1.1/proxy/network"),
+                         "timed out")
+
+    # --------------------------------------------- what a short one leaves
+
+    def test_a_blip_recovers_silently_and_is_counted(self):
+        """No DOWN went out, so there is nothing to have recovered from. But six
+        of these in an evening is something flapping, and the weekly update is
+        now the only place the owner would learn that."""
+        self.poll(True)
+        self.outage(60)
         self.poll(True)
         self.assertEqual(self.sent, [])
+        seen = self.poller.outage.blips(0)
+        self.assertEqual(seen["Home Assistant"]["count"], 1)
+        self.assertEqual(seen["Home Assistant"]["longest"], 90)
 
-    def test_recovery_is_sent_on_the_first_success(self):
+    def test_an_outage_that_paged_is_not_also_a_blip(self):
         self.poll(True)
-        self.poll(False)
-        self.poll(False)
+        self.outage(self.WAIT)
         self.poll(True)
-        self.assertEqual(self.titles(), ["Home Assistant is DOWN", "Home Assistant recovered"])
+        self.assertEqual(self.poller.outage.blips(0), {})
+
+    def test_recovery_is_sent_on_the_first_success_and_says_how_long(self):
+        self.poll(True)
+        self.outage(self.WAIT + 240)
+        self.poll(True)
+        self.assertEqual(self.titles(), ["HOME ASSISTANT · down", "HOME ASSISTANT · back up"])
+        self.assertIn("was down 9m", self.sent[1][1])
 
     # ------------------------------------------------ across a restart (#73)
 
-    def test_a_system_down_at_boot_alerts_once_it_has_failed_twice(self):
+    def test_a_system_down_at_boot_alerts_once_it_has_outlasted_the_wait(self):
         """Never seen up, so there was no True->False transition, which is why
         Home Assistant down at boot on 9 Nov never alerted."""
-        self.poll(False)
+        self.outage(self.WAIT - 30)
         self.assertEqual(self.sent, [])
         self.poll(False)
-        self.assertEqual(self.titles(), ["Home Assistant is DOWN"])
+        self.assertEqual(self.titles(), ["HOME ASSISTANT · down"])
 
     def test_a_down_before_a_restart_still_gets_its_recovered(self):
         """9 Nov: "Docker is DOWN" at 18:03:31, restart at 18:03:44, and no
-        "recovered" ever followed."""
-        self.poll(False)
-        self.poll(False)
+        "recovered" ever followed. The latch keeps when the outage began, so the
+        process that sends the recovery can still say how long it was."""
+        self.outage(self.WAIT)
         self.restart()
         self.poll(True)
-        self.assertEqual(self.titles(), ["Home Assistant is DOWN", "Home Assistant recovered"])
+        self.assertEqual(self.titles(), ["HOME ASSISTANT · down", "HOME ASSISTANT · back up"])
+        self.assertIn("was down 5m", self.sent[1][1])
 
     def test_a_restart_does_not_say_down_twice(self):
-        self.poll(False)
-        self.poll(False)
+        self.outage(self.WAIT)
         self.restart()
-        self.poll(False)
-        self.poll(False)
-        self.assertEqual(self.titles(), ["Home Assistant is DOWN"],
+        self.outage(self.WAIT)
+        self.assertEqual(self.titles(), ["HOME ASSISTANT · down"],
                          "the latch outlived the process, so the owner was already told")
 
 
@@ -271,7 +334,7 @@ class SmartTest(_Fixture):
         because a disk never seen before had no previous status to differ from."""
         self.smart.sweep()
         self.smart.sweep()
-        self.assertEqual(self.titles(), ["Disk FAIL: /dev/sda on pve"])
+        self.assertEqual(self.titles(), ["DISK · /dev/sda on pve · fail"])
         _, _, kw = self.sent[0]
         self.assertEqual(kw["priority"], "urgent")
         self.assertEqual(kw["key"], "smart:pve:/dev/sda")
@@ -285,15 +348,15 @@ class SmartTest(_Fixture):
         self.smart.sweep()
         self.restart()
         self.smart.sweep()
-        self.assertEqual(self.titles(), ["Disk FAIL: /dev/sda on pve"])
+        self.assertEqual(self.titles(), ["DISK · /dev/sda on pve · fail"])
 
     def test_a_failure_alerted_before_a_restart_gets_its_recovery(self):
         self.smart.sweep()
         self.restart()
         self.disk = HEALTHY_DISK
         self.smart.sweep()
-        self.assertEqual(self.titles(), ["Disk FAIL: /dev/sda on pve",
-                                         "Disk recovered: /dev/sda on pve"])
+        self.assertEqual(self.titles(), ["DISK · /dev/sda on pve · fail",
+                                         "DISK · /dev/sda on pve · ok again"])
 
 
 if __name__ == "__main__":

@@ -506,12 +506,13 @@ def _alert_on_transition(job: dict, status: str, st: dict | None = None) -> None
     key = f"backup:{job['id']}"
     if status in _ALERT:
         priority, tags = _ALERT[status]
-        notify.send(f"Backup {status}: {name}",
+        notify.send(f"BACKUP · {name} · {status}",
                     f"{name} is {status}{_why(st or {}, time.time())}",
-                    priority=priority, tags=tags, key=key)
+                    priority=priority, tags=tags, key=key, link="#/ops/backups")
     elif prev in _ALERT and status == "ok":
-        notify.send(f"Backup recovered: {name}", f"{name} is ok again.",
-                    priority="default", tags=["white_check_mark"], key=key)
+        notify.send(f"BACKUP · {name} · ok again", f"{name} is ok again.",
+                    priority="default", tags=["white_check_mark"], key=key,
+                    link="#/ops/backups")
 
 
 # -------------------------------------------------------------------- sweep
