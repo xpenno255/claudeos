@@ -15,6 +15,7 @@
 
 import { api } from "../api.js";
 import { el, timeAgo, clockTime, pressable } from "../util.js";
+import { tone, pillClass } from "../severity.js";
 
 const REFRESH_MS = 30000;          // the server sweeps every 60 s
 
@@ -304,7 +305,7 @@ function issueRow(issue, snap, toast) {
   const opened = stamp(issue.created_at);
   const st = state(issue, snap);
   return el("tr", {},
-    el("td", {}, el("span", { class: `led ${open ? "ok" : "off"}`, title: open ? "open" : "closed" })),
+    el("td", {}, rowLed(open, st)),
     el("td", { class: "num mono-dim" }, `#${issue.number ?? "?"}`),
     el("td", { class: "strong", title: preview(issue.body) }, titleCell(issue, st)),
     el("td", {}, triageCell(st)),
@@ -403,13 +404,22 @@ function cell(...kids) {
 // the finer distinction belongs anyway.
 function verdictClass(verdict, severity) {
   if (verdict === "no_fault_found") return "ok";
-  return severity === "critical" ? "err" : "warn";
+  return tone(severity) === "critical" ? "err" : "warn";
 }
 
-// A severity on its own — not a verdict — where grey is fine because the word
-// beside it says what it is. This is the AI findings list's mapping.
-function severityClass(sev) {
-  return sev === "critical" ? "err" : sev === "info" ? "neutral" : "warn";
+// The row's LED says what is known about the problem, never just that the
+// issue is open (#86): green beside a lab issue diagnosed `serious` read as
+// health. An assessed issue wears its verdict's colour; one nobody has
+// assessed here (untriaged, running, failed, or a verdict not held locally) is
+// grey, because the app does not know how bad it is. Closed is grey too.
+function rowLed(open, st) {
+  if (!open) return el("span", { class: "led off", title: "closed" });
+  if (st.kind !== "verdict") {
+    return el("span", { class: "led off", title: "open, severity not assessed here" });
+  }
+  const { verdict, severity } = st.rec;
+  return el("span", { class: `led ${verdictClass(verdict, severity)}`,
+                      title: `open, ${verdictWord(verdict)}, ${severity || "severity unknown"}` });
 }
 
 function triageCell(st) {
@@ -521,18 +531,21 @@ function verdictPanels(number, got) {
 
   const failed = Boolean(v.error);
   const word = VERDICTS[v.verdict] || { glyph: "•", text: String(v.verdict || "?") };
-  const sev = SEVERITIES.has(v.severity) ? v.severity : "info";
+  // An unrecognised severity is shown as itself, in grey, rather than
+  // relabelled `info`: that would claim a judgement the run never made (#86).
+  const sev = SEVERITIES.has(v.severity) ? v.severity : null;
 
   // The left border is the lab issue's severity — except on the failure path,
   // where there is no assessed severity to show and the card is about the run.
-  return [backLink(), el("div", { class: `finding ${failed ? "critical" : sev}` },
+  return [backLink(), el("div", { class: `finding ${failed ? "critical" : sev || ""}` },
     el("div", { class: "finding-head" },
       el("span", { class: `pill ${failed ? "err" : verdictClass(v.verdict, v.severity)}` },
         failed ? "✕ TRIAGE FAILED" : `${word.glyph} ${word.text}`),
       // Not on the failure path. A run that died never assessed severity or
       // confidence — the block carries the cautious defaults, and rendering
       // them as pills claims a judgement nothing made.
-      failed ? null : el("span", { class: `pill ${severityClass(sev)}` }, sev.toUpperCase()),
+      failed ? null : el("span", { class: `pill ${pillClass(sev)}` },
+        String(sev || v.severity || "unknown").toUpperCase()),
       failed ? null : el("span", { class: "pill neutral" },
         `${v.confidence || "?"} confidence`.toUpperCase()),
       el("span", { class: "finding-title" }, got.title || `LAB ISSUE #${number}`)),

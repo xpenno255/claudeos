@@ -48,6 +48,20 @@ export function clockTime(ts) {
   return new Date(ts * 1000).toLocaleTimeString([], { hour12: false });
 }
 
+// A time that says which day it was when that is not today (#86). A bare
+// "00:55" in a log reads as this morning whether it was or was a week ago.
+// The year is added only once it differs, so the common case stays short.
+export function stampTime(ts) {
+  const d = new Date(ts * 1000);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) return clockTime(ts);
+  const day = d.toLocaleDateString([], {
+    day: "2-digit", month: "short",
+    ...(d.getFullYear() !== now.getFullYear() ? { year: "numeric" } : {}),
+  });
+  return `${day} ${d.toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit" })}`;
+}
+
 // "We could not look" — distinct from "there is nothing here", which is the
 // confusion #75 found in three views. Every empty state in this app is a claim
 // about the lab; a failed fetch makes no claim at all, so it must not borrow

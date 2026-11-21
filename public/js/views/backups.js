@@ -8,14 +8,11 @@ import { api } from "../api.js";
 import { el, fmtBytes, timeAgo, couldNotLoad, labelFor } from "../util.js";
 import { sparkline } from "../charts.js";
 import { confirmAction } from "../guard.js";
+import { pillClass, ledClass } from "../severity.js";
 
-// `never` deliberately reads as a warning, not a neutral blank. A job added and
-// never wired up is the likeliest silent failure this tab exists to catch, and
-// an empty cell would let it pass for fine.
-const PILL = {
-  ok: "ok", stale: "err", failed: "err", anomaly: "warn",
-  never: "warn", unprotected: "warn", muted: "neutral",
-};
+// Status colours come from the shared map (#86), where `never` deliberately
+// reads as a warning, not a neutral blank: a job added and never wired up is
+// the likeliest silent failure this tab exists to catch.
 
 const BLURB = {
   ok: "succeeded recently",
@@ -162,7 +159,7 @@ function row(j, toast) {
     .filter(s => s !== null && s !== undefined)
     .map((s, i) => [i, s]);
   const tr = el("tr", {},
-    el("td", {}, el("span", { class: `led ${status === "ok" ? "ok" : status === "muted" ? "off" : PILL[status] === "err" ? "err" : "warn"}` })),
+    el("td", {}, el("span", { class: `led ${ledClass(status)}` })),
     el("td", {},
       el("div", { class: "strong" }, j.name),
       el("div", { class: "mono-dim" }, detail)),
@@ -175,7 +172,7 @@ function row(j, toast) {
       : el("span", { class: "mono-dim" }, j.baseline_ready === false && sizes.length
         ? "baseline forming" : "—")),
     el("td", {},
-      el("span", { class: `pill ${PILL[status] || "neutral"}` }, status.toUpperCase()),
+      el("span", { class: `pill ${pillClass(status)}` }, status.toUpperCase()),
       j.muted && j.real_status && j.real_status !== "muted"
         // muting hides the alert, not the fact
         ? el("span", { class: "mono-dim", style: "margin-left:6px" }, `(${j.real_status})`)

@@ -2,7 +2,7 @@
 // health, container states and the live ops log.
 
 import { api } from "../api.js";
-import { el, fmtBytes, fmtPct, fmtUptime, clockTime, timeAgo, couldNotLoad } from "../util.js";
+import { el, fmtBytes, fmtPct, fmtUptime, clockTime, stampTime, timeAgo, couldNotLoad } from "../util.js";
 import { sparkline, meter } from "../charts.js";
 import { SYSTEMS, BY_ID } from "../meta.js";
 
@@ -325,7 +325,8 @@ function logPanel(log, span) {
   if (!entries.length) feed.append(el("div", { class: "mono-dim" }, "no events yet"));
   for (const e of entries) {
     feed.append(el("div", { class: `feed-row ${e.level}` },
-      el("span", { class: "feed-ts" }, clockTime(e.ts)),
+      // dated when not today: the log runs back further than one day (#86)
+      el("span", { class: "feed-ts" }, stampTime(e.ts)),
       el("span", { class: "feed-sys" }, e.system),
       el("span", { class: "feed-msg" }, e.message)));
   }
